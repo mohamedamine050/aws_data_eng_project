@@ -1,0 +1,6 @@
+# The runtime code needs no third-party packages:
+#   - weather_producer Lambda: standard library (urllib) + boto3 (Lambda runtime)
+#   - stream_processor Lambda: standard library + boto3 (Lambda runtime)
+#
+# This file lists deps only for LOCAL testing/invocation of the Lambda code.
+boto3>=1.34
