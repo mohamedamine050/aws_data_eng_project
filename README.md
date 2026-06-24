@@ -23,7 +23,9 @@ EventBridge ──> weather_producer Lambda ──> Kinesis Stream ──> strea
 │   └── lambdas/
 │       ├── weather_producer/handler.py      # Weather API -> Kinesis (scheduled Lambda)
 │       └── stream_processor/handler.py      # Kinesis -> S3 raw
+├── tests/                                   # pytest unit tests
 ├── requirements.txt                         # boto3 (local testing only)
+├── requirements-dev.txt                     # + pytest
 ├── .env.example                             # CONFIG_PATH env-var template
 └── README.md
 ```
@@ -158,6 +160,21 @@ The producer normalizes the Open-Meteo response into this stable schema (in
 schema means the stream processor doesn't break if the upstream API shape
 changes. `temp_min`/`temp_max`/`visibility` are `null` because the
 current-weather endpoint doesn't provide them.
+
+## Tests
+
+Unit tests (pytest) cover the schema mapping and both Lambda handlers — no AWS or
+network access (boto3 clients and the weather API are mocked/stubbed):
+
+```bash
+pip install -r requirements-dev.txt
+pytest
+```
+
+`tests/` contains `test_weather_schema.py`, `test_weather_producer.py` and
+`test_stream_processor.py` (config loading, location parsing, URL building,
+fetch/normalize, Kinesis puts, decode/validate, partitioning, and the
+end-to-end handler paths including dropped-record and S3-failure cases).
 
 ## Notes
 
