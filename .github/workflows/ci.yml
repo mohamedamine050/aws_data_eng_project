@@ -89,7 +89,7 @@ jobs:
       - name: Checkout Terraform Repo
         uses: actions/checkout@v4
         with:
-          repository: mohamedamine050/terraform-weather-pipeline-923f7699
+          repository: mohamedamine050/terraform-weather-pipeline-1808181f
           token: ${{ secrets.GH_TOKEN }}
 
       - name: Configure AWS Credentials
