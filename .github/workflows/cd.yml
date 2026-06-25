@@ -1,0 +1,204 @@
+name: CD Pipeline
+
+on:
+  push:
+    branches:
+      - main
+    paths-ignore:
+      - '**'
+  workflow_dispatch:
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout Data Repo
+        uses: actions/checkout@v4
+        with:
+          repository: mohamedamine050/aws_data_eng_project
+          token: ${{ secrets.GH_TOKEN }}
+
+      - name: Checkout Terraform Repo
+        uses: actions/checkout@v4
+        with:
+          repository: mohamedamine050/terraform-weather-pipeline-1808181f
+          token: ${{ secrets.GH_TOKEN }}
+          path: terraform
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Configure AWS Credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region: ${{ secrets.AWS_REGION }}
+
+      - name: Setup Terraform
+        uses: hashicorp/setup-terraform@v3
+
+      - name: Terraform Init
+        working-directory: terraform/infra
+        run: |
+          terraform init -input=false
+
+      - name: Build common layer
+        run: |
+          mkdir -p layer/python/common
+          cp -r src/common/* layer/python/common/
+          mkdir -p dist
+          cd layer
+          zip -r ../dist/common_layer.zip python
+
+      - name: Upload common layer to S3
+        run: |
+          aws s3 cp dist/common_layer.zip s3://tfstate-weather-pipeline-olvsigpg/layer/common_layer.zip
+          echo "✓ common layer uploaded to s3://tfstate-weather-pipeline-olvsigpg/layer/common_layer.zip"
+
+
+      # ─── Lambda: stream_processor ────────────────────────────
+      - name: Resolve Lambda stream_processor function name
+        working-directory: terraform/infra
+        run: |
+          set -euo pipefail
+          NAME="stream_processor"
+          echo "::group::Available terraform outputs"
+          terraform output -json | jq -r 'to_entries[] | "\(.key) = \(.value.value)"' || true
+          echo "::endgroup::"
+          FN=$(terraform output -json | jq -r --arg n "$NAME" '[to_entries[] | select((.key|ascii_downcase)|contains($n)) | select((.key|ascii_downcase)|test("name")) | select((.key|ascii_downcase)|test("arn|uri|url|s3|bucket|key|zip|version|qualifier")|not) | .value.value] | .[0] // empty')
+          if [ -z "$FN" ] || [ "$FN" = "null" ]; then
+            FN=$(terraform output -json | jq -r --arg n "$NAME" '[to_entries[] | select((.key|ascii_downcase)|contains($n)) | .value.value | select(type=="string")] | .[0] // empty')
+          fi
+          if [ -z "$FN" ] || [ "$FN" = "null" ]; then
+            echo "⚠ No terraform output matched '$NAME' — falling back to directory name"
+            FN="$NAME"
+          fi
+          echo "LAMBDA_FUNCTION_NAME_1=$FN" >> $GITHUB_ENV
+          echo "✓ Resolved stream_processor → $FN"
+
+      - name: Package & upload Lambda stream_processor
+        run: |
+          mkdir -p dist
+          cd src/lambdas/stream_processor
+          zip -r ../../../dist/stream_processor.zip . -x '__pycache__/*'
+          cd ../../..
+          aws s3 cp dist/stream_processor.zip s3://tfstate-weather-pipeline-olvsigpg/lambda/stream_processor.zip
+          echo "✓ stream_processor uploaded to s3://tfstate-weather-pipeline-olvsigpg/lambda/stream_processor.zip"
+
+      - name: Update Lambda stream_processor code
+        run: |
+          aws lambda update-function-code \
+            --function-name "${LAMBDA_FUNCTION_NAME_1}" \
+            --s3-bucket "tfstate-weather-pipeline-olvsigpg" \
+            --s3-key "lambda/stream_processor.zip" \
+            --publish
+          echo "✓ ${LAMBDA_FUNCTION_NAME_1} updated"
+
+      - name: Wait for Lambda stream_processor update
+        run: |
+          aws lambda wait function-updated --function-name "${LAMBDA_FUNCTION_NAME_1}"
+          echo "✓ Lambda is stable"
+
+      - name: Inject config into Lambda stream_processor
+        run: |
+          aws lambda update-function-configuration \
+            --function-name "${LAMBDA_FUNCTION_NAME_1}" \
+            --environment "Variables={CONFIG_PATH=s3://tfstate-weather-pipeline-olvsigpg/config.json,DEPS_PATH=s3://tfstate-weather-pipeline-olvsigpg/dependencies.zip}"
+          echo "✓ ENV injected: CONFIG_PATH + DEPS_PATH"
+
+      # ─── Lambda: weather_producer ────────────────────────────
+      - name: Resolve Lambda weather_producer function name
+        working-directory: terraform/infra
+        run: |
+          set -euo pipefail
+          NAME="weather_producer"
+          echo "::group::Available terraform outputs"
+          terraform output -json | jq -r 'to_entries[] | "\(.key) = \(.value.value)"' || true
+          echo "::endgroup::"
+          FN=$(terraform output -json | jq -r --arg n "$NAME" '[to_entries[] | select((.key|ascii_downcase)|contains($n)) | select((.key|ascii_downcase)|test("name")) | select((.key|ascii_downcase)|test("arn|uri|url|s3|bucket|key|zip|version|qualifier")|not) | .value.value] | .[0] // empty')
+          if [ -z "$FN" ] || [ "$FN" = "null" ]; then
+            FN=$(terraform output -json | jq -r --arg n "$NAME" '[to_entries[] | select((.key|ascii_downcase)|contains($n)) | .value.value | select(type=="string")] | .[0] // empty')
+          fi
+          if [ -z "$FN" ] || [ "$FN" = "null" ]; then
+            echo "⚠ No terraform output matched '$NAME' — falling back to directory name"
+            FN="$NAME"
+          fi
+          echo "LAMBDA_FUNCTION_NAME_2=$FN" >> $GITHUB_ENV
+          echo "✓ Resolved weather_producer → $FN"
+
+      - name: Package & upload Lambda weather_producer
+        run: |
+          mkdir -p dist
+          cd src/lambdas/weather_producer
+          zip -r ../../../dist/weather_producer.zip . -x '__pycache__/*'
+          cd ../../..
+          aws s3 cp dist/weather_producer.zip s3://tfstate-weather-pipeline-olvsigpg/lambda/weather_producer.zip
+          echo "✓ weather_producer uploaded to s3://tfstate-weather-pipeline-olvsigpg/lambda/weather_producer.zip"
+
+      - name: Update Lambda weather_producer code
+        run: |
+          aws lambda update-function-code \
+            --function-name "${LAMBDA_FUNCTION_NAME_2}" \
+            --s3-bucket "tfstate-weather-pipeline-olvsigpg" \
+            --s3-key "lambda/weather_producer.zip" \
+            --publish
+          echo "✓ ${LAMBDA_FUNCTION_NAME_2} updated"
+
+      - name: Wait for Lambda weather_producer update
+        run: |
+          aws lambda wait function-updated --function-name "${LAMBDA_FUNCTION_NAME_2}"
+          echo "✓ Lambda is stable"
+
+      - name: Inject config into Lambda weather_producer
+        run: |
+          aws lambda update-function-configuration \
+            --function-name "${LAMBDA_FUNCTION_NAME_2}" \
+            --environment "Variables={CONFIG_PATH=s3://tfstate-weather-pipeline-olvsigpg/config.json,DEPS_PATH=s3://tfstate-weather-pipeline-olvsigpg/dependencies.zip}"
+          echo "✓ ENV injected: CONFIG_PATH + DEPS_PATH"
+
+      # ─── Lambda trigger + smoke test: stream_processor ───
+      - name: Trigger Lambda stream_processor
+        run: |
+          aws lambda invoke \
+            --function-name "${LAMBDA_FUNCTION_NAME_1}" \
+            --payload '{}' \
+            --cli-binary-format raw-in-base64-out \
+            /tmp/lambda_response_1.json
+          echo "✓ stream_processor triggered"
+
+      - name: Smoke Test - Validate Lambda stream_processor
+        run: |
+          set -euo pipefail
+          RESULT=$(aws lambda invoke \
+            --function-name "${LAMBDA_FUNCTION_NAME_1}" \
+            --payload '{}' \
+            --cli-binary-format raw-in-base64-out \
+            /tmp/lambda_response_1.json \
+            --query 'StatusCode' --output text)
+          cat /tmp/lambda_response_1.json
+          [ "$RESULT" -eq 200 ] && echo "✅ stream_processor smoke test passed" || (echo "❌ stream_processor returned $RESULT" && exit 1)
+
+      # ─── Lambda trigger + smoke test: weather_producer ───
+      - name: Trigger Lambda weather_producer
+        run: |
+          aws lambda invoke \
+            --function-name "${LAMBDA_FUNCTION_NAME_2}" \
+            --payload '{}' \
+            --cli-binary-format raw-in-base64-out \
+            /tmp/lambda_response_2.json
+          echo "✓ weather_producer triggered"
+
+      - name: Smoke Test - Validate Lambda weather_producer
+        run: |
+          set -euo pipefail
+          RESULT=$(aws lambda invoke \
+            --function-name "${LAMBDA_FUNCTION_NAME_2}" \
+            --payload '{}' \
+            --cli-binary-format raw-in-base64-out \
+            /tmp/lambda_response_2.json \
+            --query 'StatusCode' --output text)
+          cat /tmp/lambda_response_2.json
+          [ "$RESULT" -eq 200 ] && echo "✅ weather_producer smoke test passed" || (echo "❌ weather_producer returned $RESULT" && exit 1)
