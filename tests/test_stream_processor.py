@@ -1,6 +1,5 @@
 """Unit tests for the stream_processor Lambda handler."""
 
-import base64
 import importlib.util
 import json
 import os
@@ -26,12 +25,12 @@ def processor():
     return module
 
 
-def _kinesis_record(event_obj, seq="1", event_id="shardId-000000000000:49"):
-    data = base64.b64encode(json.dumps(event_obj).encode("utf-8")).decode("utf-8")
+def _sqs_record(event_obj, message_id="1"):
     return {
-        "kinesis": {"data": data, "sequenceNumber": seq, "partitionKey": "pk"},
-        "eventID": event_id,
-        "eventSourceARN": "arn:aws:kinesis:::stream/x",
+        "messageId": message_id,
+        "receiptHandle": "rh",
+        "body": json.dumps(event_obj),
+        "eventSourceARN": "arn:aws:sqs:::weather-queue",
     }
 
 
@@ -69,13 +68,12 @@ def test_load_config_local(processor, tmp_path):
 # ── DECODE & VALIDATE ────────────────────────────────────────
 
 def test_decode_record(processor):
-    rec = _kinesis_record({"hello": "world"})
+    rec = _sqs_record({"hello": "world"})
     assert processor._decode_record(rec) == {"hello": "world"}
 
 
 def test_decode_empty_raises(processor):
-    rec = _kinesis_record("")
-    rec["kinesis"]["data"] = base64.b64encode(b"   ").decode()
+    rec = {"messageId": "1", "body": "   "}
     with pytest.raises(processor.InvalidRecordError):
         processor._decode_record(rec)
 
@@ -109,19 +107,14 @@ def test_partition_for_bad_timestamp_uses_now(processor):
     assert len(d) == 10 and len(h) == 2  # YYYY-MM-DD / HH
 
 
-def test_shard_token(processor):
-    rec = {"eventID": "shardId-000000000000:49590"}
-    assert processor._shard_token(rec) == "s000000000000"
-
-
 def test_build_key_format(processor):
-    key = processor._build_key("2026-06-24", "15", "s00", "raw/")
-    assert key.startswith("raw/dt=2026-06-24/hour=15/s00-")
+    key = processor._build_key("2026-06-24", "15", "raw/")
+    assert key.startswith("raw/dt=2026-06-24/hour=15/")
     assert key.endswith(".json")
 
 
 def test_build_key_adds_trailing_slash(processor):
-    key = processor._build_key("2026-06-24", "15", "s00", "raw")  # no trailing /
+    key = processor._build_key("2026-06-24", "15", "raw")  # no trailing /
     assert key.startswith("raw/dt=2026-06-24/")
 
 
@@ -137,7 +130,7 @@ def test_handler_writes_to_s3(processor, monkeypatch, tmp_path):
 
     event = {
         "CONFIG_PATH": str(cfg),
-        "Records": [_kinesis_record(_valid_event()), _kinesis_record(_valid_event(), seq="2")],
+        "Records": [_sqs_record(_valid_event()), _sqs_record(_valid_event(), message_id="2")],
     }
     result = processor.handler(event, None)
 
@@ -158,7 +151,7 @@ def test_handler_drops_invalid_records(processor, monkeypatch, tmp_path):
 
     bad = _valid_event()
     del bad["measurement"]  # invalid -> dropped, must NOT block
-    event = {"CONFIG_PATH": str(cfg), "Records": [_kinesis_record(bad)]}
+    event = {"CONFIG_PATH": str(cfg), "Records": [_sqs_record(bad)]}
 
     result = processor.handler(event, None)
     assert result == {"batchItemFailures": []}
@@ -173,7 +166,7 @@ def test_handler_reports_failure_on_s3_error(processor, monkeypatch, tmp_path):
         raise RuntimeError("s3 down")
 
     monkeypatch.setattr(processor.S3, "put_object", boom)
-    event = {"CONFIG_PATH": str(cfg), "Records": [_kinesis_record(_valid_event(), seq="42")]}
+    event = {"CONFIG_PATH": str(cfg), "Records": [_sqs_record(_valid_event(), message_id="42")]}
 
     result = processor.handler(event, None)
     assert result["batchItemFailures"] == [{"itemIdentifier": "42"}]

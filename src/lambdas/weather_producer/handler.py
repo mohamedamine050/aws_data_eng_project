@@ -1,20 +1,22 @@
-"""Scheduled weather producer Lambda (EventBridge -> Lambda -> Kinesis).
+"""Scheduled weather producer Lambda (EventBridge -> Lambda -> SQS).
 
 A *single-batch* producer, triggered on a schedule by Amazon EventBridge
 (e.g. once per hour):
 
-    EventBridge (rate/cron) ──> [this Lambda] ──> Kinesis Data Stream
+    EventBridge (rate/cron) ──> [this Lambda] ──> Amazon SQS queue
 
 On each invocation it fetches current weather for the configured locations from
-the Open-Meteo API and pushes one record per location to Kinesis. There is no
-loop: EventBridge controls the cadence, the function does one batch and returns.
+the Open-Meteo API and sends one message per location to an SQS queue. There is
+no loop: EventBridge controls the cadence, the function does one batch and
+returns. (SQS is used instead of Kinesis: serverless, free-tier friendly, and
+it triggers the downstream stream_processor Lambda directly.)
 
 Data source: **Open-Meteo** (https://open-meteo.com) — free, **no API key
 required**. It is queried by latitude/longitude, so locations are configured as
 city + coordinates (see the LOCATIONS env var below).
 
 For a fast, dependency-light cold start this handler uses only the standard
-library (`urllib`) for HTTP and `boto3` (already in the runtime) for Kinesis.
+library (`urllib`) for HTTP and `boto3` (already in the runtime) for SQS.
 The record schema lives in `common.weather_schema` so the event shape is defined
 in one place.
 
@@ -30,7 +32,7 @@ Configuration
 Driven by a JSON config file, pointed to by the CONFIG_PATH environment variable
 (local path or s3://bucket/key). Config keys:
 
-    KINESIS_STREAM_NAME   (required)  Target Kinesis stream.
+    QUEUE_URL             (required)  Target SQS queue URL.
     OPEN_METEO_API_KEY    (optional)  Only for a paid Open-Meteo plan; switches to
                                       the customer endpoint + apikey param. Free
                                       tier needs no key.
@@ -97,7 +99,10 @@ DEFAULT_LOCATIONS = [
 ]
 
 # Created at module load so they are reused across warm invocations.
-_KINESIS = boto3.client("kinesis")
+_SQS = boto3.client("sqs")
+
+# SQS SendMessageBatch accepts at most 10 entries per call.
+SQS_BATCH_SIZE = 10
 
 
 # ─────────────────────────────────────────────
@@ -140,7 +145,7 @@ def resolve_locations(config_locations: Optional[List[Dict[str, Any]]]) -> List[
     """Build the list of locations from config, or fall back to the defaults.
 
     Each config entry is an object: {city, latitude, longitude[, country]}.
-    A deterministic location_id is derived for use as the Kinesis partition key.
+    A deterministic location_id is derived and kept on each record for traceability.
     """
     source = config_locations if config_locations else DEFAULT_LOCATIONS
     locations: List[Dict[str, Any]] = []
@@ -206,32 +211,32 @@ def fetch_weather(location: Dict[str, Any], units: str, timeout: int,
 
 
 # ─────────────────────────────────────────────
-# LOAD (Kinesis)
+# LOAD (SQS)
 # ─────────────────────────────────────────────
 
-def put_records(stream_name: str, records: List[Dict[str, Any]]) -> int:
-    """Send records to Kinesis with PutRecords. Returns the failed count."""
+def send_messages(queue_url: str, records: List[Dict[str, Any]]) -> int:
+    """Send records to SQS with SendMessageBatch (<=10 per call). Returns the
+    number of records that failed to be enqueued."""
     if not records:
         return 0
 
-    entries = [
-        {
-            "Data": (json.dumps(rec) + "\n").encode("utf-8"),
-            "PartitionKey": str(rec["location"]["location_id"]),
-        }
-        for rec in records
-    ]
-    try:
-        resp = _KINESIS.put_records(StreamName=stream_name, Records=entries)
-    except (BotoCoreError, ClientError) as exc:
-        LOGGER.error("PutRecords failed entirely: %s", exc)
-        return len(records)
+    failed = 0
+    for start in range(0, len(records), SQS_BATCH_SIZE):
+        chunk = records[start:start + SQS_BATCH_SIZE]
+        entries = [
+            {"Id": str(i), "MessageBody": json.dumps(rec)}
+            for i, rec in enumerate(chunk)
+        ]
+        try:
+            resp = _SQS.send_message_batch(QueueUrl=queue_url, Entries=entries)
+        except (BotoCoreError, ClientError) as exc:
+            LOGGER.error("SendMessageBatch failed entirely: %s", exc)
+            failed += len(chunk)
+            continue
 
-    failed = resp.get("FailedRecordCount", 0)
-    if failed:
-        for result in resp["Records"]:
-            if "ErrorCode" in result:
-                LOGGER.warning("Record failed: %s - %s", result["ErrorCode"], result.get("ErrorMessage"))
+        for fail in resp.get("Failed", []):
+            LOGGER.warning("Message failed: %s - %s", fail.get("Code"), fail.get("Message"))
+        failed += len(resp.get("Failed", []))
     return failed
 
 
@@ -243,9 +248,9 @@ def lambda_handler(event: Dict[str, Any], context: Any) -> Dict[str, Any]:  # no
     args = get_args(event)
     config = load_config(args["CONFIG_PATH"])
 
-    stream_name = config.get("KINESIS_STREAM_NAME")
-    if not stream_name:
-        raise RuntimeError("KINESIS_STREAM_NAME is missing from the config.")
+    queue_url = config.get("QUEUE_URL")
+    if not queue_url:
+        raise RuntimeError("QUEUE_URL is missing from the config.")
 
     # Optional: only needed for a paid Open-Meteo plan. Empty -> free tier.
     api_key = str(config.get("OPEN_METEO_API_KEY", "")).strip()
@@ -260,7 +265,7 @@ def lambda_handler(event: Dict[str, Any], context: Any) -> Dict[str, Any]:  # no
         if rec is not None:
             records.append(rec)
 
-    failed = put_records(stream_name, records)
+    failed = send_messages(queue_url, records)
     sent = len(records) - failed
     result = {
         "locations_requested": len(locations),

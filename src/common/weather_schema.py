@@ -4,7 +4,7 @@ Stdlib-only (no third-party imports) so the scheduled producer Lambda
 (`src/lambdas/weather_producer/handler.py`) can import it without dragging extra
 dependencies into its deployment package.
 
-Centralizing `normalize_record` here keeps the record schema sent to Kinesis in
+Centralizing `normalize_record` here keeps the record schema sent to SQS in
 one place, so the downstream stream-processor Lambda always sees a single shape.
 
 Data source: Open-Meteo (https://open-meteo.com) — a free weather API that needs

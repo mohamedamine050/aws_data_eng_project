@@ -6,13 +6,13 @@ processing logic for each stage — not the infrastructure (no
 Terraform/CloudFormation).
 
 ```
-EventBridge ──> weather_producer Lambda ──> Kinesis Stream ──> stream_processor Lambda ──> S3 (raw)
+EventBridge ──> weather_producer Lambda ──> SQS queue ──> stream_processor Lambda ──> S3 (raw)
 ```
 
 | Stage | Script | What it does |
 |-------|--------|--------------|
-| Produce | [src/lambdas/weather_producer/handler.py](src/lambdas/weather_producer/handler.py) | Scheduled Lambda (EventBridge); fetches current weather from Open-Meteo (no API key) and pushes JSON records to Kinesis |
-| Process | [src/lambdas/stream_processor/handler.py](src/lambdas/stream_processor/handler.py) | Kinesis-triggered Lambda; validates/enriches records and lands NDJSON in S3 `raw/`, partitioned by date/hour |
+| Produce | [src/lambdas/weather_producer/handler.py](src/lambdas/weather_producer/handler.py) | Scheduled Lambda (EventBridge); fetches current weather from Open-Meteo (no API key) and sends JSON messages to SQS |
+| Process | [src/lambdas/stream_processor/handler.py](src/lambdas/stream_processor/handler.py) | SQS-triggered Lambda; validates/enriches records and lands NDJSON in S3 `raw/`, partitioned by date/hour |
 
 ## Layout
 
@@ -21,8 +21,8 @@ EventBridge ──> weather_producer Lambda ──> Kinesis Stream ──> strea
 ├── src/
 │   ├── common/weather_schema.py             # record schema (stdlib only), used by the producer
 │   └── lambdas/
-│       ├── weather_producer/handler.py      # Weather API -> Kinesis (scheduled Lambda)
-│       └── stream_processor/handler.py      # Kinesis -> S3 raw
+│       ├── weather_producer/handler.py      # Weather API -> SQS (scheduled Lambda)
+│       └── stream_processor/handler.py      # SQS -> S3 raw
 ├── tests/                                   # pytest unit tests
 ├── requirements.txt                         # boto3 (local testing only)
 ├── requirements-dev.txt                     # + pytest
@@ -30,22 +30,21 @@ EventBridge ──> weather_producer Lambda ──> Kinesis Stream ──> strea
 └── README.md
 ```
 
-## 1. Producer — Weather API → Kinesis (scheduled Lambda)
+## 1. Producer — Weather API → SQS (scheduled Lambda)
 
 The producer runs as a **scheduled Lambda**, triggered by EventBridge:
 
 ```
-EventBridge (rate/cron)  ──>  weather_producer Lambda  ──>  Kinesis
+EventBridge (rate/cron)  ──>  weather_producer Lambda  ──>  SQS
 ```
 
 `src/lambdas/weather_producer/handler.py` is a **single-batch** producer
 (entrypoint `handler.lambda_handler`). On each invocation it fetches current
-weather for the configured locations and pushes one record per location to
-Kinesis. It uses only the standard library (`urllib`) + `boto3`, so it needs
+weather for the configured locations and sends one message per location to
+SQS. It uses only the standard library (`urllib`) + `boto3`, so it needs
 **no extra dependencies or layer** — EventBridge controls the cadence, the
-function does one fetch-and-push per call. It batches all locations into a single
-`PutRecords` call, using each location id as the partition key (ordered per
-location).
+function does one fetch-and-send per call. It sends all locations via
+`SendMessageBatch` (batches of up to 10).
 
 Data source: **[Open-Meteo](https://open-meteo.com)** — free, **no API key
 required**. It is queried by latitude/longitude, so locations are configured as
@@ -76,7 +75,7 @@ local path for testing). Example:
 
 ```json
 {
-  "KINESIS_STREAM_NAME": "rt-weather-analytics-dev-stream",
+  "QUEUE_URL": "https://sqs.us-east-1.amazonaws.com/123456789012/weather-queue",
   "OPEN_METEO_API_KEY": "",
   "UNITS": "metric",
   "HTTP_TIMEOUT": 10,
@@ -88,7 +87,7 @@ local path for testing). Example:
 
 | Config key | Required | Notes |
 |-----------|----------|-------|
-| `KINESIS_STREAM_NAME` | yes | target stream |
+| `QUEUE_URL` | yes | target SQS queue URL |
 | `OPEN_METEO_API_KEY` | no | only for a paid Open-Meteo plan (customer endpoint + `apikey`); free tier needs no key |
 | `LOCATIONS` | no | list of `{city, latitude, longitude[, country]}`, default London/Paris/Tokyo/New York/Tunis |
 | `UNITS` | no | `metric` (default) / `imperial` |
@@ -111,31 +110,31 @@ or an EventBridge **Scheduler** schedule (`cron(0 * * * ? *)` for top of every h
 The handler returns a small summary (`{locations_requested, fetched, sent, failed}`)
 that shows up in CloudWatch Logs.
 
-> IAM: the Lambda's execution role needs `kinesis:PutRecords` on the stream,
+> IAM: the Lambda's execution role needs `sqs:SendMessage` on the queue,
 > plus the basic Lambda logging permissions. No outbound secrets needed —
 > Open-Meteo requires no API key.
 
-## 2. Stream processor — Kinesis → S3 raw
+## 2. Stream processor — SQS → S3 raw
 
 `src/lambdas/stream_processor/handler.py` is the handler (`handler.handler`).
 Pure standard library + `boto3` (already in the Lambda runtime), so the
 deployment package is just this file.
 
-- Configure the Kinesis **event source mapping** with
-  `FunctionResponseTypes = ["ReportBatchItemFailures"]` so only failed records
-  are retried (the handler returns `batchItemFailures`).
-- Poison/invalid records are logged and dropped (never block the shard).
+- Configure the SQS **event source mapping** with
+  `FunctionResponseTypes = ["ReportBatchItemFailures"]` so only failed messages
+  are retried (the handler returns `batchItemFailures` by `messageId`).
+- Poison/invalid messages are logged and dropped (never block the queue).
 - **Configuration** via `CONFIG_PATH` → JSON config file on S3, e.g.
   `{"OUTPUT_BUCKET": "my-data-lake-bucket", "RAW_PREFIX": "raw/"}` —
   `OUTPUT_BUCKET` (required), `RAW_PREFIX` (optional, default `raw/`).
   `get_args(event)` reads `CONFIG_PATH` from the event argument, but since the
-  Kinesis trigger carries records (not config), set `CONFIG_PATH` as an env var
+  SQS trigger carries messages (not config), set `CONFIG_PATH` as an env var
   here. `LOG_LEVEL` optional.
 
-Output objects: `s3://<bucket>/raw/dt=YYYY-MM-DD/hour=HH/<shard>-<ts>.json`
+Output objects: `s3://<bucket>/raw/dt=YYYY-MM-DD/hour=HH/<ts>-<uuid>.json`
 (newline-delimited JSON, partitioned by event date/hour).
 
-## Record schema (producer → Kinesis → stream processor → S3)
+## Record schema (producer → SQS → stream processor → S3)
 
 ```json
 {
@@ -173,14 +172,14 @@ pytest
 
 `tests/` contains `test_weather_schema.py`, `test_weather_producer.py` and
 `test_stream_processor.py` (config loading, location parsing, URL building,
-fetch/normalize, Kinesis puts, decode/validate, partitioning, and the
+fetch/normalize, SQS sends, decode/validate, partitioning, and the
 end-to-end handler paths including dropped-record and S3-failure cases).
 
 ## Notes
 
-- These scripts assume the AWS resources (Kinesis stream, S3 bucket, the two
+- These scripts assume the AWS resources (SQS queue, S3 bucket, the two
   Lambdas, EventBridge rule) already exist — provision them with your IaC tool of
   choice and wire the names/env vars in.
-- Cost-optimization choices baked into the code: batched Kinesis puts, NDJSON
+- Cost-optimization choices baked into the code: batched SQS sends, NDJSON
   output, date/hour partitioning of the raw zone, and partial-batch Lambda
   responses to avoid reprocessing whole batches.

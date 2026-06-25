@@ -47,8 +47,8 @@ def test_get_args_missing_raises(producer, monkeypatch):
 
 def test_load_config_local_file(producer, tmp_path):
     cfg = tmp_path / "c.json"
-    cfg.write_text(json.dumps({"KINESIS_STREAM_NAME": "s"}), encoding="utf-8")
-    assert producer.load_config(str(cfg))["KINESIS_STREAM_NAME"] == "s"
+    cfg.write_text(json.dumps({"QUEUE_URL": "https://sqs/q"}), encoding="utf-8")
+    assert producer.load_config(str(cfg))["QUEUE_URL"] == "https://sqs/q"
 
 
 # ── LOCATIONS ────────────────────────────────────────────────
@@ -131,36 +131,50 @@ def test_fetch_weather_no_current_returns_none(producer, monkeypatch):
     assert producer.fetch_weather(loc, "metric", 10) is None
 
 
-# ── LOAD (Kinesis) ───────────────────────────────────────────
+# ── LOAD (SQS) ───────────────────────────────────────────────
 
 def _record(loc_id="tunis-tn"):
     return {"location": {"location_id": loc_id}, "measurement": {"temperature": 1}}
 
 
-def test_put_records_success(producer, monkeypatch):
+def test_send_messages_success(producer, monkeypatch):
     captured = {}
 
-    def fake_put(StreamName, Records):
-        captured["stream"] = StreamName
-        captured["n"] = len(Records)
-        return {"FailedRecordCount": 0, "Records": [{} for _ in Records]}
+    def fake_send(QueueUrl, Entries):
+        captured["url"] = QueueUrl
+        captured["n"] = len(Entries)
+        return {"Successful": [{} for _ in Entries], "Failed": []}
 
-    monkeypatch.setattr(producer._KINESIS, "put_records", fake_put)
-    failed = producer.put_records("my-stream", [_record(), _record("london-gb")])
+    monkeypatch.setattr(producer._SQS, "send_message_batch", fake_send)
+    failed = producer.send_messages("https://sqs/queue", [_record(), _record("london-gb")])
     assert failed == 0
-    assert captured == {"stream": "my-stream", "n": 2}
+    assert captured == {"url": "https://sqs/queue", "n": 2}
 
 
-def test_put_records_empty(producer):
-    assert producer.put_records("s", []) == 0
+def test_send_messages_batches_over_10(producer, monkeypatch):
+    calls = []
+    monkeypatch.setattr(producer._SQS, "send_message_batch",
+                        lambda QueueUrl, Entries: calls.append(len(Entries)) or {"Failed": []})
+    producer.send_messages("q", [_record() for _ in range(23)])
+    assert calls == [10, 10, 3]  # chunked into batches of <=10
 
 
-def test_put_records_total_failure(producer, monkeypatch):
-    def boom(StreamName, Records):
+def test_send_messages_empty(producer):
+    assert producer.send_messages("q", []) == 0
+
+
+def test_send_messages_total_failure(producer, monkeypatch):
+    def boom(QueueUrl, Entries):
         raise producer.BotoCoreError()
 
-    monkeypatch.setattr(producer._KINESIS, "put_records", boom)
-    assert producer.put_records("s", [_record()]) == 1
+    monkeypatch.setattr(producer._SQS, "send_message_batch", boom)
+    assert producer.send_messages("q", [_record()]) == 1
+
+
+def test_send_messages_partial_failure(producer, monkeypatch):
+    monkeypatch.setattr(producer._SQS, "send_message_batch",
+                        lambda QueueUrl, Entries: {"Failed": [{"Id": "0", "Code": "X"}]})
+    assert producer.send_messages("q", [_record(), _record("x")]) == 1
 
 
 # ── HANDLER ──────────────────────────────────────────────────
@@ -168,7 +182,7 @@ def test_put_records_total_failure(producer, monkeypatch):
 def test_lambda_handler_end_to_end(producer, monkeypatch, tmp_path):
     cfg = tmp_path / "prod.json"
     cfg.write_text(json.dumps({
-        "KINESIS_STREAM_NAME": "demo",
+        "QUEUE_URL": "https://sqs/demo",
         "LOCATIONS": [{"city": "Tunis", "country": "TN", "latitude": 36.8, "longitude": 10.1}],
     }), encoding="utf-8")
 
@@ -176,9 +190,8 @@ def test_lambda_handler_end_to_end(producer, monkeypatch, tmp_path):
     monkeypatch.setattr(producer.urllib.request, "urlopen", lambda *a, **k: _FakeResp(payload))
 
     sent = []
-    monkeypatch.setattr(producer._KINESIS, "put_records",
-                        lambda StreamName, Records: (sent.extend(Records),
-                                                     {"FailedRecordCount": 0, "Records": [{} for _ in Records]})[1])
+    monkeypatch.setattr(producer._SQS, "send_message_batch",
+                        lambda QueueUrl, Entries: (sent.extend(Entries), {"Failed": []})[1])
 
     result = producer.lambda_handler({"CONFIG_PATH": str(cfg)}, None)
     assert result == {"locations_requested": 1, "fetched": 1, "sent": 1, "failed": 0}

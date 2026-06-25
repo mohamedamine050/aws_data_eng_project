@@ -1,18 +1,18 @@
-"""Kinesis -> S3 raw landing Lambda.
+"""SQS -> S3 raw landing Lambda.
 
-Triggered by the Kinesis Data Stream (event source mapping). For each batch of
-records it:
+Triggered by the Amazon SQS queue (event source mapping). For each batch of
+messages it:
 
   1. Decodes and validates each weather event.
   2. Lightly enriches it (adds processing metadata + derived partition keys).
   3. Buffers valid events and writes them as newline-delimited JSON (NDJSON)
      to the raw zone of the S3 data lake, partitioned by event date/hour:
 
-         s3://<bucket>/raw/dt=YYYY-MM-DD/hour=HH/<stream>-<shard>-<ts>.json
+         s3://<bucket>/raw/dt=YYYY-MM-DD/hour=HH/<timestamp>-<uuid>.json
 
 This is the *Serverless Stream Processing* stage:
 
-    Kinesis ──> [this Lambda] ──> S3 (raw)
+    SQS ──> [this Lambda] ──> S3 (raw)
 
 Configuration
 -------------
@@ -24,15 +24,14 @@ Configuration
 
     Env vars: CONFIG_PATH (required), LOG_LEVEL (optional).
 
-The function uses Kinesis partial-batch-response: only the records that fail
-are reported back so successfully processed records are not redelivered.
-Configure the event source mapping with
+The function uses SQS partial-batch-response: only the messages that fail are
+reported back (by messageId) so successfully processed messages are deleted from
+the queue. Configure the event source mapping with
 ``FunctionResponseTypes = ["ReportBatchItemFailures"]``.
 """
 
 from __future__ import annotations
 
-import base64
 import json
 import logging
 import os
@@ -60,8 +59,8 @@ REQUIRED_KEYS = ("observed_at", "location", "measurement")
 
 def get_args(event: Dict[str, Any]) -> Dict[str, str]:
     """Resolve runtime args. CONFIG_PATH is passed as an argument via the
-    invocation event, with a fallback to the CONFIG_PATH env var. (A Kinesis
-    event carries records, not config, so this Lambda typically uses the env
+    invocation event, with a fallback to the CONFIG_PATH env var. (An SQS event
+    carries messages, not config, so this Lambda typically uses the env
     fallback.) It points to a JSON config (local file or s3://...)."""
     config_path = (event or {}).get("CONFIG_PATH") or os.environ.get("CONFIG_PATH")
     if not config_path:
@@ -89,9 +88,8 @@ class InvalidRecordError(ValueError):
 
 
 def _decode_record(record: Dict[str, Any]) -> Dict[str, Any]:
-    """Base64-decode and JSON-parse a single Kinesis record's data."""
-    raw = base64.b64decode(record["kinesis"]["data"])
-    text = raw.decode("utf-8").strip()
+    """JSON-parse a single SQS message body."""
+    text = (record.get("body") or "").strip()
     if not text:
         raise InvalidRecordError("empty payload")
     return json.loads(text)
@@ -126,25 +124,17 @@ def _enrich(event: Dict[str, Any], record: Dict[str, Any]) -> Dict[str, Any]:
     """Attach processing metadata useful for lineage/debugging."""
     event["_meta"] = {
         "processed_at": datetime.now(timezone.utc).isoformat(),
-        "kinesis_sequence_number": record["kinesis"].get("sequenceNumber"),
-        "kinesis_partition_key": record["kinesis"].get("partitionKey"),
+        "sqs_message_id": record.get("messageId"),
         "event_source_arn": record.get("eventSourceARN"),
     }
     return event
 
 
-def _build_key(partition_date: str, hour: str, shard_token: str, raw_prefix: str) -> str:
+def _build_key(partition_date: str, hour: str, raw_prefix: str) -> str:
     ts = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%S")
     unique = uuid.uuid4().hex[:8]
     prefix = raw_prefix if raw_prefix.endswith("/") else raw_prefix + "/"
-    return f"{prefix}dt={partition_date}/hour={hour}/{shard_token}-{ts}-{unique}.json"
-
-
-def _shard_token(record: Dict[str, Any]) -> str:
-    """Derive a short, filename-safe token from the source shard, for object names."""
-    eid = record.get("eventID", "")  # format: "shardId-000000000000:49590..."
-    shard = eid.split(":", 1)[0] if ":" in eid else "shard"
-    return shard.replace("shardId-", "s")
+    return f"{prefix}dt={partition_date}/hour={hour}/{ts}-{unique}.json"
 
 
 # ─────────────────────────────────────────────
@@ -176,38 +166,38 @@ def handler(event: Dict[str, Any], context: Any) -> Dict[str, Any]:  # noqa: ARG
     raw_prefix = config.get("RAW_PREFIX", "raw/")
 
     records = event.get("Records", [])
-    LOGGER.info("Received %d Kinesis records", len(records))
+    LOGGER.info("Received %d SQS messages", len(records))
 
-    # Group valid events by (partition, shard) so each S3 object holds one
-    # partition's worth of data from one shard -> clean date/hour partitioning.
-    groups: Dict[Tuple[str, str, str], List[Dict[str, Any]]] = defaultdict(list)
+    # Group valid events by (date, hour) so each S3 object holds one partition's
+    # worth of data. Track which message ids fed each group, so a failed write
+    # can be reported back to SQS for redelivery.
+    groups: Dict[Tuple[str, str], List[Dict[str, Any]]] = defaultdict(list)
+    msg_ids_by_group: Dict[Tuple[str, str], List[str]] = defaultdict(list)
     failures: List[Dict[str, str]] = []
-    last_seq_by_group: Dict[Tuple[str, str, str], str] = {}
 
     for record in records:
-        seq = record["kinesis"].get("sequenceNumber", "unknown")
+        msg_id = record.get("messageId", "unknown")
         try:
             decoded = _decode_record(record)
             _validate(decoded)
             enriched = _enrich(decoded, record)
-            pdate, phour = _partition_for(enriched)
-            key = (pdate, phour, _shard_token(record))
+            key = _partition_for(enriched)
             groups[key].append(enriched)
-            last_seq_by_group[key] = seq
+            msg_ids_by_group[key].append(msg_id)
         except (InvalidRecordError, json.JSONDecodeError, KeyError, UnicodeDecodeError) as exc:
             # Bad data: log and skip. We do NOT add it to batchItemFailures,
-            # otherwise a poison record would block the shard forever.
-            LOGGER.warning("Dropping invalid record %s: %s", seq, exc)
+            # otherwise a poison message would be redelivered forever.
+            LOGGER.warning("Dropping invalid message %s: %s", msg_id, exc)
 
-    # Write each group to S3. If a write fails, mark that group's records so
-    # Kinesis retries them (via the last sequence number in the group).
+    # Write each group to S3. If a write fails, report every message that fed
+    # that group so SQS redelivers them.
     for key, events in groups.items():
-        pdate, phour, shard_token = key
-        s3_key = _build_key(pdate, phour, shard_token, raw_prefix)
+        pdate, phour = key
+        s3_key = _build_key(pdate, phour, raw_prefix)
         try:
             _flush_group(bucket, s3_key, events)
-        except Exception as exc:  # noqa: BLE001 - report to Kinesis for retry
+        except Exception as exc:  # noqa: BLE001 - report to SQS for retry
             LOGGER.error("Failed writing group %s: %s", key, exc)
-            failures.append({"itemIdentifier": last_seq_by_group[key]})
+            failures.extend({"itemIdentifier": mid} for mid in msg_ids_by_group[key])
 
     return {"batchItemFailures": failures}
