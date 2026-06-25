@@ -1,0 +1,182 @@
+name: CD Pipeline
+
+on:
+  push:
+    branches:
+      - main
+    paths-ignore:
+      - '**'
+  workflow_dispatch:
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout Data Repo
+        uses: actions/checkout@v4
+        with:
+          repository: mohamedamine050/aws_data_eng_project
+          token: ${{ secrets.GH_TOKEN }}
+
+      - name: Checkout Terraform Repo
+        uses: actions/checkout@v4
+        with:
+          repository: mohamedamine050/terraform-weather-pipeline-c664c982
+          token: ${{ secrets.GH_TOKEN }}
+          path: terraform
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Configure AWS Credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region: ${{ secrets.AWS_REGION }}
+
+      - name: Setup Terraform
+        uses: hashicorp/setup-terraform@v3
+
+      - name: Terraform Init
+        working-directory: terraform/infra
+        run: |
+          terraform init -input=false
+
+      - name: Debug Terraform outputs
+        working-directory: terraform/infra
+        run: |
+          terraform output
+
+
+      # ─── Lambda: stream_processor → weather_processor_lambda_name ───
+      - name: Resolve Lambda stream_processor outputs
+        working-directory: terraform/infra
+        run: |
+          set -euo pipefail
+          echo "LAMBDA_FUNCTION_NAME_1=$(terraform output -raw weather_processor_lambda_name)" >> $GITHUB_ENV
+          echo "LAMBDA_ZIP_URI_1=$(terraform output -raw processor_test_zip_s3_uri)" >> $GITHUB_ENV
+          echo "✓ stream_processor → $(terraform output -raw weather_processor_lambda_name) @ $(terraform output -raw processor_test_zip_s3_uri)"
+
+      - name: Package & upload Lambda stream_processor
+        run: |
+          set -euo pipefail
+          mkdir -p dist
+          (cd src/lambdas/stream_processor && zip -r ../../../dist/stream_processor.zip . -x '__pycache__/*')
+          aws s3 cp dist/stream_processor.zip "${LAMBDA_ZIP_URI_1}"
+          echo "✓ stream_processor uploaded to ${LAMBDA_ZIP_URI_1}"
+
+      - name: Update Lambda stream_processor code
+        run: |
+          set -euo pipefail
+          BUCKET=$(echo "${LAMBDA_ZIP_URI_1}" | sed 's|s3://||' | cut -d/ -f1)
+          KEY=$(echo "${LAMBDA_ZIP_URI_1}" | sed 's|s3://[^/]*/||')
+          aws lambda update-function-code \
+            --function-name "${LAMBDA_FUNCTION_NAME_1}" \
+            --s3-bucket "$BUCKET" \
+            --s3-key "$KEY" \
+            --publish
+          echo "✓ ${LAMBDA_FUNCTION_NAME_1} updated"
+
+      - name: Wait for Lambda stream_processor update
+        run: |
+          aws lambda wait function-updated --function-name "${LAMBDA_FUNCTION_NAME_1}"
+          echo "✓ Lambda is stable"
+
+      - name: Sync Lambda stream_processor handler
+        run: |
+          set -euo pipefail
+          aws lambda update-function-configuration \
+            --function-name "${LAMBDA_FUNCTION_NAME_1}" \
+            --handler "handler.lambda_handler"
+          aws lambda wait function-updated --function-name "${LAMBDA_FUNCTION_NAME_1}"
+          echo "✓ handler set to handler.lambda_handler"
+
+      # ─── Lambda: weather_producer → weather_fetcher_lambda_name ───
+      - name: Resolve Lambda weather_producer outputs
+        working-directory: terraform/infra
+        run: |
+          set -euo pipefail
+          echo "LAMBDA_FUNCTION_NAME_2=$(terraform output -raw weather_fetcher_lambda_name)" >> $GITHUB_ENV
+          echo "LAMBDA_ZIP_URI_2=$(terraform output -raw fetcher_test_zip_s3_uri)" >> $GITHUB_ENV
+          echo "✓ weather_producer → $(terraform output -raw weather_fetcher_lambda_name) @ $(terraform output -raw fetcher_test_zip_s3_uri)"
+
+      - name: Package & upload Lambda weather_producer
+        run: |
+          set -euo pipefail
+          mkdir -p dist
+          (cd src/lambdas/weather_producer && zip -r ../../../dist/weather_producer.zip . -x '__pycache__/*')
+          aws s3 cp dist/weather_producer.zip "${LAMBDA_ZIP_URI_2}"
+          echo "✓ weather_producer uploaded to ${LAMBDA_ZIP_URI_2}"
+
+      - name: Update Lambda weather_producer code
+        run: |
+          set -euo pipefail
+          BUCKET=$(echo "${LAMBDA_ZIP_URI_2}" | sed 's|s3://||' | cut -d/ -f1)
+          KEY=$(echo "${LAMBDA_ZIP_URI_2}" | sed 's|s3://[^/]*/||')
+          aws lambda update-function-code \
+            --function-name "${LAMBDA_FUNCTION_NAME_2}" \
+            --s3-bucket "$BUCKET" \
+            --s3-key "$KEY" \
+            --publish
+          echo "✓ ${LAMBDA_FUNCTION_NAME_2} updated"
+
+      - name: Wait for Lambda weather_producer update
+        run: |
+          aws lambda wait function-updated --function-name "${LAMBDA_FUNCTION_NAME_2}"
+          echo "✓ Lambda is stable"
+
+      - name: Sync Lambda weather_producer handler
+        run: |
+          set -euo pipefail
+          aws lambda update-function-configuration \
+            --function-name "${LAMBDA_FUNCTION_NAME_2}" \
+            --handler "handler.lambda_handler"
+          aws lambda wait function-updated --function-name "${LAMBDA_FUNCTION_NAME_2}"
+          echo "✓ handler set to handler.lambda_handler"
+
+      # ─── Lambda trigger + smoke test: stream_processor ───
+      - name: Trigger Lambda stream_processor
+        run: |
+          aws lambda invoke \
+            --function-name "${LAMBDA_FUNCTION_NAME_1}" \
+            --payload '{}' \
+            --cli-binary-format raw-in-base64-out \
+            /tmp/lambda_response_1.json
+          echo "✓ stream_processor triggered"
+
+      - name: Smoke Test - Validate Lambda stream_processor
+        run: |
+          set -euo pipefail
+          RESULT=$(aws lambda invoke \
+            --function-name "${LAMBDA_FUNCTION_NAME_1}" \
+            --payload '{}' \
+            --cli-binary-format raw-in-base64-out \
+            /tmp/lambda_response_1.json \
+            --query 'StatusCode' --output text)
+          cat /tmp/lambda_response_1.json
+          [ "$RESULT" -eq 200 ] && echo "✅ stream_processor smoke test passed" || (echo "❌ stream_processor returned $RESULT" && exit 1)
+
+      # ─── Lambda trigger + smoke test: weather_producer ───
+      - name: Trigger Lambda weather_producer
+        run: |
+          aws lambda invoke \
+            --function-name "${LAMBDA_FUNCTION_NAME_2}" \
+            --payload '{}' \
+            --cli-binary-format raw-in-base64-out \
+            /tmp/lambda_response_2.json
+          echo "✓ weather_producer triggered"
+
+      - name: Smoke Test - Validate Lambda weather_producer
+        run: |
+          set -euo pipefail
+          RESULT=$(aws lambda invoke \
+            --function-name "${LAMBDA_FUNCTION_NAME_2}" \
+            --payload '{}' \
+            --cli-binary-format raw-in-base64-out \
+            /tmp/lambda_response_2.json \
+            --query 'StatusCode' --output text)
+          cat /tmp/lambda_response_2.json
+          [ "$RESULT" -eq 200 ] && echo "✅ weather_producer smoke test passed" || (echo "❌ weather_producer returned $RESULT" && exit 1)
