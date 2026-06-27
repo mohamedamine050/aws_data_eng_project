@@ -156,7 +156,7 @@ def _flush_group(bucket: str, key: str, events: List[Dict[str, Any]]) -> None:
 # HANDLER
 # ─────────────────────────────────────────────
 
-def handler(event: Dict[str, Any], context: Any) -> Dict[str, Any]:  # noqa: ARG001
+def lambda_handler(event: Dict[str, Any], context: Any) -> Dict[str, Any]:  # noqa: ARG001
     args = get_args(event)
     config = load_config(args["CONFIG_PATH"])
 
