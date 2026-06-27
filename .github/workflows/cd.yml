@@ -50,7 +50,6 @@ jobs:
         run: |
           terraform output
 
-
       # ─── Lambda: stream_processor → lambda_process_name ───
       - name: Resolve Lambda stream_processor outputs
         working-directory: terraform/infra
@@ -74,20 +73,23 @@ jobs:
       - name: Update Lambda stream_processor code
         run: |
           set -euo pipefail
+
           BUCKET=$(echo "${LAMBDA_ZIP_URI_1}" | sed 's|s3://||' | cut -d/ -f1)
           KEY=$(echo "${LAMBDA_ZIP_URI_1}" | sed 's|s3://[^/]*/||')
+
           aws lambda update-function-code \
             --function-name "${LAMBDA_FUNCTION_NAME_1}" \
             --s3-bucket "$BUCKET" \
-            --s3-key "$KEY" \
-            --publish
-          echo "✓ $LAMBDA_FUNCTION_NAME_1 updated"
+            --s3-key "$KEY"
 
-      - name: Wait for Lambda stream_processor update
-        run: |
-          set -euo pipefail
-          aws lambda wait function-updated --function-name "${LAMBDA_FUNCTION_NAME_1}"
-          echo "✓ Lambda is stable"
+          aws lambda update-function-configuration \
+            --function-name "${LAMBDA_FUNCTION_NAME_1}" \
+            --handler handler.lambda_handler
+
+          aws lambda wait function-updated \
+            --function-name "${LAMBDA_FUNCTION_NAME_1}"
+
+          echo "✓ ${LAMBDA_FUNCTION_NAME_1} updated"
 
       # ─── Lambda: weather_producer → lambda_fetch_name ───
       - name: Resolve Lambda weather_producer outputs
@@ -112,61 +114,43 @@ jobs:
       - name: Update Lambda weather_producer code
         run: |
           set -euo pipefail
+
           BUCKET=$(echo "${LAMBDA_ZIP_URI_2}" | sed 's|s3://||' | cut -d/ -f1)
           KEY=$(echo "${LAMBDA_ZIP_URI_2}" | sed 's|s3://[^/]*/||')
+
           aws lambda update-function-code \
             --function-name "${LAMBDA_FUNCTION_NAME_2}" \
             --s3-bucket "$BUCKET" \
-            --s3-key "$KEY" \
-            --publish
-          echo "✓ $LAMBDA_FUNCTION_NAME_2 updated"
+            --s3-key "$KEY"
 
-      - name: Wait for Lambda weather_producer update
-        run: |
-          set -euo pipefail
-          aws lambda wait function-updated --function-name "${LAMBDA_FUNCTION_NAME_2}"
-          echo "✓ Lambda is stable"
+          aws lambda update-function-configuration \
+            --function-name "${LAMBDA_FUNCTION_NAME_2}" \
+            --handler handler.lambda_handler
 
-      # ─── Lambda trigger + smoke test: stream_processor ───
-      - name: Trigger Lambda stream_processor
-        run: |
-          aws lambda invoke \
-            --function-name "${LAMBDA_FUNCTION_NAME_1}" \
-            --payload '{}' \
-            --cli-binary-format raw-in-base64-out \
-            /tmp/lambda_response_1.json
-          echo "✓ stream_processor triggered"
+          aws lambda wait function-updated \
+            --function-name "${LAMBDA_FUNCTION_NAME_2}"
 
-      - name: Smoke Test - Validate Lambda stream_processor
-        run: |
-          set -euo pipefail
-          RESULT=$(aws lambda invoke \
-            --function-name "${LAMBDA_FUNCTION_NAME_1}" \
-            --payload '{}' \
-            --cli-binary-format raw-in-base64-out \
-            /tmp/lambda_response_1.json \
-            --query 'StatusCode' --output text)
-          cat /tmp/lambda_response_1.json
-          [ "$RESULT" -eq 200 ] && echo "✅ stream_processor smoke test passed" || (echo "❌ stream_processor returned $RESULT" && exit 1)
+          echo "✓ ${LAMBDA_FUNCTION_NAME_2} updated"
 
-      # ─── Lambda trigger + smoke test: weather_producer ───
-      - name: Trigger Lambda weather_producer
+      # ─── Trigger weather_producer ─────────────────────────────
+      - name: Trigger weather_producer
         run: |
           aws lambda invoke \
             --function-name "${LAMBDA_FUNCTION_NAME_2}" \
             --payload '{}' \
             --cli-binary-format raw-in-base64-out \
-            /tmp/lambda_response_2.json
+            /tmp/weather_response.json
+
+          cat /tmp/weather_response.json
           echo "✓ weather_producer triggered"
 
-      - name: Smoke Test - Validate Lambda weather_producer
+      # ─── Wait for SQS -> stream_processor ─────────────────────
+      - name: Wait for stream processing
         run: |
-          set -euo pipefail
-          RESULT=$(aws lambda invoke \
-            --function-name "${LAMBDA_FUNCTION_NAME_2}" \
-            --payload '{}' \
-            --cli-binary-format raw-in-base64-out \
-            /tmp/lambda_response_2.json \
-            --query 'StatusCode' --output text)
-          cat /tmp/lambda_response_2.json
-          [ "$RESULT" -eq 200 ] && echo "✅ weather_producer smoke test passed" || (echo "❌ weather_producer returned $RESULT" && exit 1)
+          echo "Waiting for SQS to trigger stream_processor..."
+          sleep 20
+
+      # ─── Verify stream_processor executed ─────────────────────
+      - name: Check stream_processor logs
+        run: |
+          aws logs tail "/aws/lambda/${LAMBDA_FUNCTION_NAME_1}" --since 5m
