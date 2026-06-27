@@ -1,0 +1,261 @@
+name: CD Pipeline
+
+on:
+  push:
+    branches:
+      - main
+    paths-ignore:
+      - '**'
+  workflow_dispatch:
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout Data Repo
+        uses: actions/checkout@v4
+        with:
+          repository: mohamedamine050/aws_data_eng_project
+          token: ${{ secrets.GH_TOKEN }}
+
+      - name: Checkout Terraform Repo
+        uses: actions/checkout@v4
+        with:
+          repository: mohamedamine050/terraform-weather-pipeline-c664c982
+          token: ${{ secrets.GH_TOKEN }}
+          path: terraform
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Configure AWS Credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region: ${{ secrets.AWS_REGION }}
+
+      - name: Setup Terraform
+        uses: hashicorp/setup-terraform@v3
+
+      - name: Terraform Init
+        working-directory: terraform/infra
+        run: |
+          terraform init -input=false
+
+      - name: Debug Terraform outputs
+        working-directory: terraform/infra
+        run: |
+          terraform output
+
+
+      # ─── Lambda: stream_processor → lambda_process_name ───
+      - name: Resolve Lambda stream_processor outputs
+        working-directory: terraform/infra
+        run: |
+          set -euo pipefail
+          echo "LAMBDA_FUNCTION_NAME_1=$(terraform output -raw lambda_process_name)" >> $GITHUB_ENV
+          echo "LAMBDA_ZIP_URI_1=$(terraform output -raw glue_test_script_s3_uri_process)" >> $GITHUB_ENV
+          echo "✓ stream_processor → $(terraform output -raw lambda_process_name) @ $(terraform output -raw glue_test_script_s3_uri_process)"
+
+      - name: Package & upload Lambda stream_processor
+        run: |
+          set -euo pipefail
+          mkdir -p /tmp/lambda_build
+          rm -rf /tmp/lambda_build/*
+          cp -r src/lambdas/stream_processor/. /tmp/lambda_build/ 2>/dev/null || true
+          mkdir -p /tmp/dist
+          (cd /tmp/lambda_build && zip -r /tmp/dist/stream_processor.zip . -x '__pycache__/*')
+          aws s3 cp /tmp/dist/stream_processor.zip "${LAMBDA_ZIP_URI_1}"
+          echo "✓ stream_processor uploaded to ${LAMBDA_ZIP_URI_1}"
+
+      - name: Update Lambda stream_processor code
+        run: |
+          set -euo pipefail
+          BUCKET=$(echo "${LAMBDA_ZIP_URI_1}" | sed 's|s3://||' | cut -d/ -f1)
+          KEY=$(echo "${LAMBDA_ZIP_URI_1}" | sed 's|s3://[^/]*/||')
+          aws lambda update-function-code \
+            --function-name "${LAMBDA_FUNCTION_NAME_1}" \
+            --s3-bucket "$BUCKET" \
+            --s3-key "$KEY" \
+            --publish
+          echo "✓ $LAMBDA_FUNCTION_NAME_1 updated"
+
+      - name: Wait for Lambda stream_processor update
+        run: |
+          set -euo pipefail
+          aws lambda wait function-updated --function-name "${LAMBDA_FUNCTION_NAME_1}"
+          echo "✓ Lambda is stable"
+
+      # ─── Lambda: weather_producer → lambda_fetch_name ───
+      - name: Resolve Lambda weather_producer outputs
+        working-directory: terraform/infra
+        run: |
+          set -euo pipefail
+          echo "LAMBDA_FUNCTION_NAME_2=$(terraform output -raw lambda_fetch_name)" >> $GITHUB_ENV
+          echo "LAMBDA_ZIP_URI_2=$(terraform output -raw glue_test_script_s3_uri_fetch)" >> $GITHUB_ENV
+          echo "✓ weather_producer → $(terraform output -raw lambda_fetch_name) @ $(terraform output -raw glue_test_script_s3_uri_fetch)"
+
+      - name: Package & upload Lambda weather_producer
+        run: |
+          set -euo pipefail
+          mkdir -p /tmp/lambda_build
+          rm -rf /tmp/lambda_build/*
+          cp -r src/lambdas/weather_producer/. /tmp/lambda_build/ 2>/dev/null || true
+          mkdir -p /tmp/dist
+          (cd /tmp/lambda_build && zip -r /tmp/dist/weather_producer.zip . -x '__pycache__/*')
+          aws s3 cp /tmp/dist/weather_producer.zip "${LAMBDA_ZIP_URI_2}"
+          echo "✓ weather_producer uploaded to ${LAMBDA_ZIP_URI_2}"
+
+      - name: Update Lambda weather_producer code
+        run: |
+          set -euo pipefail
+          BUCKET=$(echo "${LAMBDA_ZIP_URI_2}" | sed 's|s3://||' | cut -d/ -f1)
+          KEY=$(echo "${LAMBDA_ZIP_URI_2}" | sed 's|s3://[^/]*/||')
+          aws lambda update-function-code \
+            --function-name "${LAMBDA_FUNCTION_NAME_2}" \
+            --s3-bucket "$BUCKET" \
+            --s3-key "$KEY" \
+            --publish
+          echo "✓ $LAMBDA_FUNCTION_NAME_2 updated"
+
+      - name: Wait for Lambda weather_producer update
+        run: |
+          set -euo pipefail
+          aws lambda wait function-updated --function-name "${LAMBDA_FUNCTION_NAME_2}"
+          echo "✓ Lambda is stable"
+
+      # ─── Lambda trigger + smoke test: stream_processor ───
+      - name: Trigger Lambda stream_processor
+        run: |
+          aws lambda invoke \
+            --function-name "${LAMBDA_FUNCTION_NAME_1}" \
+            --payload '{}' \
+            --cli-binary-format raw-in-base64-out \
+            /tmp/lambda_response_1.json
+          echo "✓ stream_processor triggered"
+
+      - name: Smoke Test - Validate Lambda stream_processor
+        run: |
+          set -euo pipefail
+          RESULT=$(aws lambda invoke \
+            --function-name "${LAMBDA_FUNCTION_NAME_1}" \
+            --payload '{}' \
+            --cli-binary-format raw-in-base64-out \
+            /tmp/lambda_response_1.json \
+            --query 'StatusCode' --output text)
+          cat /tmp/lambda_response_1.json
+          [ "$RESULT" -eq 200 ] && echo "✅ stream_processor smoke test passed" || (echo "❌ stream_processor returned $RESULT" && exit 1)
+
+      # ─── Lambda trigger + smoke test: weather_producer ───
+      - name: Trigger Lambda weather_producer
+        run: |
+          aws lambda invoke \
+            --function-name "${LAMBDA_FUNCTION_NAME_2}" \
+            --payload '{}' \
+            --cli-binary-format raw-in-base64-out \
+            /tmp/lambda_response_2.json
+          echo "✓ weather_producer triggered"
+
+      - name: Smoke Test - Validate Lambda weather_producer
+        run: |
+          set -euo pipefail
+          RESULT=$(aws lambda invoke \
+            --function-name "${LAMBDA_FUNCTION_NAME_2}" \
+            --payload '{}' \
+            --cli-binary-format raw-in-base64-out \
+            /tmp/lambda_response_2.json \
+            --query 'StatusCode' --output text)
+          cat /tmp/lambda_response_2.json
+          [ "$RESULT" -eq 200 ] && echo "✅ weather_producer smoke test passed" || (echo "❌ weather_producer returned $RESULT" && exit 1)
+
+      # ─────────────────────────────
+      # SQS producer/consumer flow
+      # Producer first, then wait, then consumer
+      # ─────────────────────────────
+      - name: Resolve SQS producer/consumer outputs
+        working-directory: terraform/infra
+        run: |
+          set -euo pipefail
+          echo "QUEUE_URL_1=$(terraform output -raw sqs_queue_url)" >> $GITHUB_ENV
+          echo "PRODUCER_RESOURCE_REF_1=$(terraform output -raw lambda_fetch_name)" >> $GITHUB_ENV
+          echo "CONSUMER_RESOURCE_REF_1=$(terraform output -raw lambda_process_name)" >> $GITHUB_ENV
+          echo "PRODUCER_TYPE_1=lambda" >> $GITHUB_ENV
+          echo "CONSUMER_TYPE_1=lambda" >> $GITHUB_ENV
+          echo "PRODUCER_PAYLOAD_1={}" >> $GITHUB_ENV
+          echo "CONSUMER_PAYLOAD_1={}" >> $GITHUB_ENV
+
+      - name: Trigger SQS producer 1
+        run: |
+          set -euo pipefail
+          cat <<'EOF' > /tmp/sqs_producer_{idx}.json
+{}
+EOF
+          if [ "$PRODUCER_TYPE_1" = "lambda" ]; then
+            aws lambda invoke \
+              --function-name "$PRODUCER_RESOURCE_REF_1" \
+              --payload file:///tmp/sqs_producer_{idx}.json \
+              --cli-binary-format raw-in-base64-out \
+              /tmp/sqs_producer_1.json
+            echo "✓ Producer $PRODUCER_RESOURCE_REF_1 triggered for queue $QUEUE_URL_1"
+          elif [ "$PRODUCER_TYPE_1" = "stepfunctions" ]; then
+            aws stepfunctions start-execution \
+              --state-machine-arn "$PRODUCER_RESOURCE_REF_1" \
+              --input file:///tmp/sqs_producer_{idx}.json \
+              --query "executionArn" --output text
+            echo "✓ Producer state machine $PRODUCER_RESOURCE_REF_1 started for queue $QUEUE_URL_1"
+          else
+            echo "Unsupported SQS producer_type $PRODUCER_TYPE_{idx} for $PRODUCER_RESOURCE_REF_{idx}"
+            exit 1
+          fi
+
+      - name: Wait for SQS messages after producer 1
+        run: |
+          set -euo pipefail
+          MAX_WAIT_SECONDS=120
+          POLL_INTERVAL_SECONDS=5
+          ELAPSED=0
+          while true; do
+            MSG_COUNT=$(aws sqs get-queue-attributes \
+              --queue-url "$QUEUE_URL_1" \
+              --attribute-names ApproximateNumberOfMessages \
+              --query 'Attributes.ApproximateNumberOfMessages' \
+              --output text)
+            if [ "$MSG_COUNT" -gt 0 ]; then
+              echo "Detected $MSG_COUNT messages in queue $QUEUE_URL_{idx}"
+              break
+            fi
+            if [ "$ELAPSED" -ge "$MAX_WAIT_SECONDS" ]; then
+              echo "Timeout waiting for SQS messages on $QUEUE_URL_{idx}"
+              exit 1
+            fi
+            sleep $POLL_INTERVAL_SECONDS
+            ELAPSED=$((ELAPSED + POLL_INTERVAL_SECONDS))
+          done
+
+      - name: Trigger SQS consumer 1
+        run: |
+          set -euo pipefail
+          cat <<'EOF' > /tmp/sqs_consumer_{idx}.json
+{}
+EOF
+          if [ "$CONSUMER_TYPE_{idx}" = "lambda" ]; then
+            aws lambda invoke \
+              --function-name "$CONSUMER_RESOURCE_REF_1" \
+              --payload file:///tmp/sqs_consumer_{idx}.json \
+              --cli-binary-format raw-in-base64-out \
+              /tmp/sqs_consumer_1.json
+            echo "✓ Consumer $CONSUMER_RESOURCE_REF_{idx} triggered after producer"
+          elif [ "$CONSUMER_TYPE_{idx}" = "stepfunctions" ]; then
+            aws stepfunctions start-execution \
+              --state-machine-arn "$CONSUMER_RESOURCE_REF_1" \
+              --input file:///tmp/sqs_consumer_{idx}.json \
+              --query "executionArn" --output text
+            echo "✓ Consumer state machine $CONSUMER_RESOURCE_REF_{idx} started after producer"
+          else
+            echo "Unsupported SQS consumer_type $CONSUMER_TYPE_{idx} for $CONSUMER_RESOURCE_REF_{idx}"
+            exit 1
+          fi
+
