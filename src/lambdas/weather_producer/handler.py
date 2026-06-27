@@ -114,7 +114,7 @@ def get_args(event: Dict[str, Any]) -> Dict[str, str]:
     invocation event (e.g. an EventBridge constant input
     {"CONFIG_PATH": "s3://..."}), with a fallback to the CONFIG_PATH env var.
     It points to a JSON config (local file or s3://...)."""
-    config_path = (event or {}).get("CONFIG_PATH") or os.environ.get("CONFIG_PATH")
+    config_path = os.environ.get("CONFIG_PATH")
     if not config_path:
         raise RuntimeError("CONFIG_PATH not provided (event argument or environment).")
     return {"CONFIG_PATH": config_path}
