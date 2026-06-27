@@ -201,3 +201,6 @@ def lambda_handler(event: Dict[str, Any], context: Any) -> Dict[str, Any]:  # no
             failures.extend({"itemIdentifier": mid} for mid in msg_ids_by_group[key])
 
     return {"batchItemFailures": failures}
+
+
+handler = lambda_handler
