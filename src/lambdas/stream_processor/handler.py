@@ -107,7 +107,6 @@ def _validate(event: Dict[str, Any]) -> None:
 # ─────────────────────────────────────────────
 
 def _partition_for(event: Dict[str, Any]) -> Tuple[str, str]:
-    """Return (date_str, hour_str) partition values from the observed timestamp."""
     ts = event.get("observed_at")
     try:
         dt = datetime.fromisoformat(ts.replace("Z", "+00:00"))
@@ -115,8 +114,11 @@ def _partition_for(event: Dict[str, Any]) -> Tuple[str, str]:
             dt = dt.replace(tzinfo=timezone.utc)
     except (AttributeError, ValueError):
         dt = datetime.now(timezone.utc)
+
     dt = dt.astimezone(timezone.utc)
-    return dt.strftime("%Y-%m-%d"), dt.strftime("%H")
+
+    # 👇 uniquement par jour
+    return dt.strftime("%Y-%m-%d"), "00"
 
 
 def _enrich(event: Dict[str, Any], record: Dict[str, Any]) -> Dict[str, Any]:
