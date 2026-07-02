@@ -158,6 +158,9 @@ jobs:
           mkdir -p /tmp/lambda_build
           rm -rf /tmp/lambda_build/*
           cp -r src/lambdas/weather_producer/. /tmp/lambda_build/ 2>/dev/null || true
+          mkdir -p /tmp/lambda_build/common
+          cp src/common/weather_schema.py /tmp/lambda_build/common/
+          touch /tmp/lambda_build/common/__init__.py
           mkdir -p /tmp/dist
           (cd /tmp/lambda_build && zip -r /tmp/dist/weather_producer.zip . -x '__pycache__/*')
           aws s3 cp /tmp/dist/weather_producer.zip "${LAMBDA_ZIP_URI_2}"
