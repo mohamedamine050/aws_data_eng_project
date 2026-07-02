@@ -108,6 +108,7 @@ def _validate(event: Dict[str, Any]) -> None:
 
 def _partition_for(event: Dict[str, Any]) -> Tuple[str, str]:
     ts = event.get("observed_at")
+
     try:
         dt = datetime.fromisoformat(ts.replace("Z", "+00:00"))
         if dt.tzinfo is None:
@@ -117,8 +118,15 @@ def _partition_for(event: Dict[str, Any]) -> Tuple[str, str]:
 
     dt = dt.astimezone(timezone.utc)
 
-    # 👇 uniquement par jour
-    return dt.strftime("%Y-%m-%d"), "00"
+    city = (
+        event.get("location", {}).get("city", "unknown")
+        .strip()
+        .lower()
+        .replace(" ", "-")
+    )
+
+    # 👇 partition par jour + ville
+    return dt.strftime("%Y-%m-%d"), city
 
 
 def _enrich(event: Dict[str, Any], record: Dict[str, Any]) -> Dict[str, Any]:
