@@ -4,6 +4,7 @@ import importlib.util
 import json
 import os
 import sys
+from datetime import datetime, timezone
 from pathlib import Path
 
 import pytest
@@ -105,6 +106,10 @@ def test_partition_for(processor):
 def test_partition_for_bad_timestamp_uses_now(processor):
     d, h = processor._partition_for({"observed_at": None})
     assert len(d) == 10 and len(h) == 2  # YYYY-MM-DD / HH
+
+
+def test_partition_for_datetime_object_uses_utc(processor):
+    assert processor._partition_for({"observed_at": datetime(2026, 6, 24, 15, 30, tzinfo=timezone.utc)}) == ("2026-06-24", "15")
 
 
 def test_build_key_format(processor):

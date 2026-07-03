@@ -37,7 +37,7 @@ import logging
 import os
 import uuid
 from collections import defaultdict
-from datetime import datetime, timezone
+from datetime import date, datetime, timezone
 from typing import Any, Dict, List, Tuple
 from urllib.parse import urlparse
 
@@ -107,26 +107,29 @@ def _validate(event: Dict[str, Any]) -> None:
 # ─────────────────────────────────────────────
 
 def _partition_for(event: Dict[str, Any]) -> Tuple[str, str]:
+    """Return (date_str, hour_str) partition values from the observed timestamp."""
     ts = event.get("observed_at")
 
-    try:
-        dt = datetime.fromisoformat(ts.replace("Z", "+00:00"))
-        if dt.tzinfo is None:
-            dt = dt.replace(tzinfo=timezone.utc)
-    except (AttributeError, ValueError):
+    if isinstance(ts, datetime):
+        dt = ts
+    elif isinstance(ts, date):
+        dt = datetime(ts.year, ts.month, ts.day, tzinfo=timezone.utc)
+    elif isinstance(ts, str):
+        text = ts.strip()
+        try:
+            dt = datetime.fromisoformat(text.replace("Z", "+00:00"))
+        except ValueError:
+            dt = None
+    else:
+        dt = None
+
+    if dt is None:
         dt = datetime.now(timezone.utc)
+    if dt.tzinfo is None:
+        dt = dt.replace(tzinfo=timezone.utc)
 
     dt = dt.astimezone(timezone.utc)
-
-    city = (
-        event.get("location", {}).get("city", "unknown")
-        .strip()
-        .lower()
-        .replace(" ", "-")
-    )
-
-    # 👇 partition par jour + ville
-    return dt.strftime("%Y-%m-%d"), city
+    return dt.strftime("%Y-%m-%d"), dt.strftime("%H")
 
 
 def _enrich(event: Dict[str, Any], record: Dict[str, Any]) -> Dict[str, Any]:
