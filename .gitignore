@@ -37,3 +37,7 @@ credentials
 Thumbs.db
 .idea/
 .vscode/
+
+.coverage
+coverage.xml
+
