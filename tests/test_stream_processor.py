@@ -31,15 +31,16 @@ def _sqs_record(event_obj, message_id="1"):
         "messageId": message_id,
         "receiptHandle": "rh",
         "body": json.dumps(event_obj),
-        "eventSourceARN": "arn:aws:sqs:::weather-queue",
+        "eventSourceARN": "arn:aws:sqs:::ecommerce-queue",
     }
 
 
 def _valid_event():
     return {
-        "observed_at": "2026-06-24T12:00:00+00:00",
-        "location": {"city": "Tunis", "location_id": "tunis-tn"},
-        "measurement": {"temperature": 30.0},
+        "occurred_at": "2026-06-24T12:00:00+00:00",
+        "event_type": "product_viewed",
+        "product": {"product_id": "sku-1", "name": "Keyboard"},
+        "customer": {"customer_id": "cust-7"},
     }
 
 
@@ -85,14 +86,14 @@ def test_validate_ok(processor):
 
 def test_validate_missing_key(processor):
     bad = _valid_event()
-    del bad["measurement"]
+    del bad["product"]
     with pytest.raises(processor.InvalidRecordError):
         processor._validate(bad)
 
 
-def test_validate_null_temperature(processor):
+def test_validate_missing_product_id(processor):
     bad = _valid_event()
-    bad["measurement"]["temperature"] = None
+    bad["product"] = {"name": "Keyboard"}
     with pytest.raises(processor.InvalidRecordError):
         processor._validate(bad)
 
@@ -100,16 +101,16 @@ def test_validate_null_temperature(processor):
 # ── PARTITIONING & KEYS ──────────────────────────────────────
 
 def test_partition_for(processor):
-    assert processor._partition_for({"observed_at": "2026-06-24T15:30:00+00:00"}) == ("2026-06-24", "15")
+    assert processor._partition_for({"occurred_at": "2026-06-24T15:30:00+00:00"}) == ("2026-06-24", "15")
 
 
 def test_partition_for_bad_timestamp_uses_now(processor):
-    d, h = processor._partition_for({"observed_at": None})
-    assert len(d) == 10 and len(h) == 2  # YYYY-MM-DD / HH
+    d, h = processor._partition_for({"occurred_at": None})
+    assert len(d) == 10 and len(h) == 2
 
 
 def test_partition_for_datetime_object_uses_utc(processor):
-    assert processor._partition_for({"observed_at": datetime(2026, 6, 24, 15, 30, tzinfo=timezone.utc)}) == ("2026-06-24", "15")
+    assert processor._partition_for({"occurred_at": datetime(2026, 6, 24, 15, 30, tzinfo=timezone.utc)}) == ("2026-06-24", "15")
 
 
 def test_build_key_format(processor):
@@ -119,7 +120,7 @@ def test_build_key_format(processor):
 
 
 def test_build_key_adds_trailing_slash(processor):
-    key = processor._build_key("2026-06-24", "15", "raw")  # no trailing /
+    key = processor._build_key("2026-06-24", "15", "raw")
     assert key.startswith("raw/dt=2026-06-24/")
 
 
@@ -143,7 +144,6 @@ def test_handler_writes_to_s3(processor, monkeypatch, tmp_path):
     assert len(puts) == 1
     assert puts[0]["Bucket"] == "demo-bucket"
     assert puts[0]["Key"].startswith("raw/dt=")
-    # Two NDJSON lines written.
     assert puts[0]["Body"].decode("utf-8").count("\n") == 2
 
 
@@ -155,12 +155,12 @@ def test_handler_drops_invalid_records(processor, monkeypatch, tmp_path):
     monkeypatch.setattr(processor.S3, "put_object", lambda **kw: puts.append(kw) or {})
 
     bad = _valid_event()
-    del bad["measurement"]  # invalid -> dropped, must NOT block
+    del bad["product"]
     event = {"CONFIG_PATH": str(cfg), "Records": [_sqs_record(bad)]}
 
     result = processor.handler(event, None)
     assert result == {"batchItemFailures": []}
-    assert puts == []  # nothing valid to write
+    assert puts == []
 
 
 def test_handler_reports_failure_on_s3_error(processor, monkeypatch, tmp_path):

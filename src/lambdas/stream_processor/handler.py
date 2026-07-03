@@ -3,7 +3,7 @@
 Triggered by the Amazon SQS queue (event source mapping). For each batch of
 messages it:
 
-  1. Decodes and validates each weather event.
+  1. Decodes and validates each e-commerce event.
   2. Lightly enriches it (adds processing metadata + derived partition keys).
   3. Buffers valid events and writes them as newline-delimited JSON (NDJSON)
      to the raw zone of the S3 data lake, partitioned by event date/hour:
@@ -13,21 +13,6 @@ messages it:
 This is the *Serverless Stream Processing* stage:
 
     SQS ──> [this Lambda] ──> S3 (raw)
-
-Configuration
--------------
-    Driven by a JSON config file, pointed to by the CONFIG_PATH environment
-    variable (local path or s3://bucket/key). Config keys:
-
-        OUTPUT_BUCKET      (required)  Target S3 bucket.
-        RAW_PREFIX         (optional)  Key prefix for raw data. Default "raw/".
-
-    Env vars: CONFIG_PATH (required), LOG_LEVEL (optional).
-
-The function uses SQS partial-batch-response: only the messages that fail are
-reported back (by messageId) so successfully processed messages are deleted from
-the queue. Configure the event source mapping with
-``FunctionResponseTypes = ["ReportBatchItemFailures"]``.
 """
 
 from __future__ import annotations
@@ -54,7 +39,7 @@ LOGGER.setLevel(os.environ.get("LOG_LEVEL", "INFO"))
 S3 = boto3.client("s3")
 
 # Required top-level keys for an event to be considered valid.
-REQUIRED_KEYS = ("observed_at", "location", "measurement")
+REQUIRED_KEYS = ("occurred_at", "event_type", "product", "customer")
 
 
 def get_args(event: Dict[str, Any]) -> Dict[str, str]:
@@ -98,8 +83,8 @@ def _validate(event: Dict[str, Any]) -> None:
     missing = [k for k in REQUIRED_KEYS if k not in event or event[k] in (None, {}, "")]
     if missing:
         raise InvalidRecordError(f"missing/empty keys: {missing}")
-    if event["measurement"].get("temperature") is None:
-        raise InvalidRecordError("measurement.temperature is null")
+    if not event["product"].get("product_id"):
+        raise InvalidRecordError("product.product_id is null")
 
 
 # ─────────────────────────────────────────────
@@ -107,8 +92,8 @@ def _validate(event: Dict[str, Any]) -> None:
 # ─────────────────────────────────────────────
 
 def _partition_for(event: Dict[str, Any]) -> Tuple[str, str]:
-    """Return (date_str, hour_str) partition values from the observed timestamp."""
-    ts = event.get("observed_at")
+    """Return (date_str, hour_str) partition values from the event timestamp."""
+    ts = event.get("occurred_at")
 
     if isinstance(ts, datetime):
         dt = ts

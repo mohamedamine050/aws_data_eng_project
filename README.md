@@ -1,86 +1,60 @@
-# Real-Time Weather Ingestion — Data Engineering Scripts
+# Real-Time E-Commerce Event Ingestion — Data Engineering Scripts
 
-The **data engineering code** for a serverless, cost-optimized real-time weather
-ingestion pipeline on AWS. This repo contains the **scripts only** — the
-processing logic for each stage — not the infrastructure (no
+The **data engineering code** for a serverless, cost-optimized real-time
+E-commerce event ingestion pipeline on AWS. This repo contains the **scripts
+only** — the processing logic for each stage — not the infrastructure (no
 Terraform/CloudFormation).
 
 ```
-EventBridge ──> weather_producer Lambda ──> SQS queue ──> stream_processor Lambda ──> S3 (raw)
+EventBridge ──> ecommerce_producer Lambda ──> SQS queue ──> stream_processor Lambda ──> S3 (raw)
 ```
 
-| Stage | Script | What it does |
-|-------|--------|--------------|
-| Produce | [src/lambdas/weather_producer/handler.py](src/lambdas/weather_producer/handler.py) | Scheduled Lambda (EventBridge); fetches current weather from Open-Meteo (no API key) and sends JSON messages to SQS |
-| Process | [src/lambdas/stream_processor/handler.py](src/lambdas/stream_processor/handler.py) | SQS-triggered Lambda; validates/enriches records and lands NDJSON in S3 `raw/`, partitioned by date/hour |
+| Stage | Component | What it does |
+|-------|-----------|--------------|
+| Produce | Producer Lambda | Scheduled Lambda (EventBridge); generates e-commerce events for configured products and sends JSON messages to SQS |
+| Process | Stream processor Lambda | SQS-triggered Lambda; validates/enriches records and lands NDJSON in S3 `raw/`, partitioned by date/hour |
 
 ## Layout
 
-```
-.
-├── src/
-│   ├── common/weather_schema.py             # record schema (stdlib only), used by the producer
-│   └── lambdas/
-│       ├── weather_producer/handler.py      # Weather API -> SQS (scheduled Lambda)
-│       └── stream_processor/handler.py      # SQS -> S3 raw
-├── tests/                                   # pytest unit tests
-├── requirements.txt                         # boto3 (local testing only)
-├── requirements-dev.txt                     # + pytest
-├── .env.example                             # CONFIG_PATH env-var template
-└── README.md
-```
+The project is organized around a small set of components:
+- a shared schema module for event normalization,
+- a producer Lambda for generating events,
+- a stream processor Lambda for landing them in S3,
+- a small test suite and configuration template.
 
-## 1. Producer — Weather API → SQS (scheduled Lambda)
+## 1. Producer — E-commerce events → SQS (scheduled Lambda)
 
 The producer runs as a **scheduled Lambda**, triggered by EventBridge:
 
 ```
-EventBridge (rate/cron)  ──>  weather_producer Lambda  ──>  SQS
+EventBridge (rate/cron)  ──>  ecommerce_producer Lambda  ──>  SQS
 ```
 
-`src/lambdas/weather_producer/handler.py` is a **single-batch** producer
-(entrypoint `handler.lambda_handler`). On each invocation it fetches current
-weather for the configured locations and sends one message per location to
-SQS. It uses only the standard library (`urllib`) + `boto3`, so it needs
-**no extra dependencies or layer** — EventBridge controls the cadence, the
-function does one fetch-and-send per call. It sends all locations via
-`SendMessageBatch` (batches of up to 10).
+The producer Lambda is a **single-batch** component (entrypoint
+`handler.lambda_handler`). On each invocation it generates e-commerce events
+for the configured products and sends one message per record to SQS. It uses
+only the standard library + `boto3`, so it needs **no extra dependencies or
+layer** — EventBridge controls the cadence, the function does one fetch-and-send
+per call. It sends all events via `SendMessageBatch` (batches of up to 10).
 
-Data source: **[Open-Meteo](https://open-meteo.com)** — free, **no API key
-required**. It is queried by latitude/longitude, so locations are configured as
-`city,lat,lon[,country]` (see `LOCATIONS` below).
+Data source: a product or event feed (for example an e-commerce API or catalog
+service). The payload is normalized into a stable schema before being sent to SQS.
 
-**Package** it together with the `common` package:
-
-```bash
-cd src
-mkdir -p ../build/weather_producer
-cp lambdas/weather_producer/handler.py ../build/weather_producer/handler.py
-cp -r common ../build/weather_producer/common
-cd ../build/weather_producer && zip -r ../weather_producer.zip . && cd -
-```
-
-Resulting layout inside the zip:
-
-```
-handler.py
-common/weather_schema.py
-```
+**Package** the producer component together with its shared schema module into a
+single deployment artifact.
 
 **Configuration.** `CONFIG_PATH` is passed as an **argument** in the invocation
 event — set the EventBridge rule's constant input to
-`{"CONFIG_PATH": "s3://bucket/config/weather_producer.json"}` (falls back to a
+`{"CONFIG_PATH": "s3://bucket/config/ecommerce_producer.json"}` (falls back to a
 `CONFIG_PATH` env var if absent). It points to a JSON config file (on S3, or a
 local path for testing). Example:
 
 ```json
 {
-  "QUEUE_URL": "https://sqs.us-east-1.amazonaws.com/123456789012/weather-queue",
-  "OPEN_METEO_API_KEY": "",
-  "UNITS": "metric",
-  "HTTP_TIMEOUT": 10,
-  "LOCATIONS": [
-    { "city": "Tunis", "country": "TN", "latitude": 36.8065, "longitude": 10.1815 }
+  "QUEUE_URL": "https://sqs.us-east-1.amazonaws.com/123456789012/ecommerce-queue",
+  "CHANNEL": "web",
+  "PRODUCTS": [
+    { "product_id": "sku-1001", "sku": "SKU-1001", "name": "Wireless Mouse", "price": 49.99 }
   ]
 }
 ```
@@ -88,22 +62,20 @@ local path for testing). Example:
 | Config key | Required | Notes |
 |-----------|----------|-------|
 | `QUEUE_URL` | yes | target SQS queue URL |
-| `OPEN_METEO_API_KEY` | no | only for a paid Open-Meteo plan (customer endpoint + `apikey`); free tier needs no key |
-| `LOCATIONS` | no | list of `{city, latitude, longitude[, country]}`, default London/Paris/Tokyo/New York/Tunis |
-| `UNITS` | no | `metric` (default) / `imperial` |
-| `HTTP_TIMEOUT` | no | per-request seconds, default 10 |
+| `CHANNEL` | no | channel name for the generated event, default `web` |
+| `PRODUCTS` | no | list of product objects, default sample SKUs |
 
 **EventBridge schedule** — trigger every hour. Either a classic rule:
 
 ```bash
-aws events put-rule --name weather-producer-hourly \
+aws events put-rule --name ecommerce-producer-hourly \\
   --schedule-expression "rate(1 hour)"
-aws lambda add-permission --function-name weather-producer \
+aws lambda add-permission --function-name ecommerce-producer \\
   --statement-id eventbridge-invoke --action lambda:InvokeFunction \
   --principal events.amazonaws.com \
-  --source-arn arn:aws:events:<region>:<account>:rule/weather-producer-hourly
-aws events put-targets --rule weather-producer-hourly \
-  --targets "Id"="1","Arn"="arn:aws:lambda:<region>:<account>:function:weather-producer"
+  --source-arn arn:aws:events:<region>:<account>:rule/ecommerce-producer-hourly
+aws events put-targets --rule ecommerce-producer-hourly \\
+  --targets "Id"="1","Arn"="arn:aws:lambda:<region>:<account>:function:ecommerce-producer"
 ```
 
 or an EventBridge **Scheduler** schedule (`cron(0 * * * ? *)` for top of every hour).
@@ -111,14 +83,13 @@ The handler returns a small summary (`{locations_requested, fetched, sent, faile
 that shows up in CloudWatch Logs.
 
 > IAM: the Lambda's execution role needs `sqs:SendMessage` on the queue,
-> plus the basic Lambda logging permissions. No outbound secrets needed —
-> Open-Meteo requires no API key.
+> plus the basic Lambda logging permissions.
 
 ## 2. Stream processor — SQS → S3 raw
 
-`src/lambdas/stream_processor/handler.py` is the handler (`handler.handler`).
-Pure standard library + `boto3` (already in the Lambda runtime), so the
-deployment package is just this file.
+The stream processor Lambda is the handler (`handler.handler`). Pure standard
+library + `boto3` (already in the Lambda runtime), so the deployment package is
+just the handler file.
 
 - Configure the SQS **event source mapping** with
   `FunctionResponseTypes = ["ReportBatchItemFailures"]` so only failed messages
@@ -139,41 +110,35 @@ Output objects: `s3://<bucket>/raw/dt=YYYY-MM-DD/hour=HH/<ts>-<uuid>.json`
 ```json
 {
   "schema_version": "2.0",
-  "event_id": "london-gb-2026-06-24T12:00",
+  "event_id": "product_viewed-sku-1001-2026-06-24T12:00",
   "ingested_at": "2026-06-24T12:00:05+00:00",
-  "observed_at": "2026-06-24T12:00:00+00:00",
-  "units": "metric",
-  "location": { "city": "London", "country": "GB",
-                "latitude": 51.5072, "longitude": -0.1276, "location_id": "london-gb" },
-  "measurement": { "temperature": 18.2, "feels_like": 17.9, "temp_min": null,
-                   "temp_max": null, "pressure": 1012, "humidity": 64,
-                   "wind_speed": 3.6, "wind_deg": 210, "cloudiness": 40,
-                   "visibility": null },
-  "condition": { "main": "Clouds", "description": "overcast", "code": 3 }
+  "occurred_at": "2026-06-24T12:00:00+00:00",
+  "channel": "web",
+  "event_type": "product_viewed",
+  "product": { "product_id": "sku-1001", "sku": "SKU-1001", "name": "Wireless Mouse", "category": "electronics", "price": 49.99 },
+  "customer": { "customer_id": "cust-demo", "segment": "new" },
+  "order": { "amount": 49.99, "currency": "EUR" }
 }
 ```
 
-The producer normalizes the Open-Meteo response into this stable schema (in
-[src/common/weather_schema.py](src/common/weather_schema.py)), translating WMO
-`weather_code` values into `condition.main`/`description`. Keeping a stable
-schema means the stream processor doesn't break if the upstream API shape
-changes. `temp_min`/`temp_max`/`visibility` are `null` because the
-current-weather endpoint doesn't provide them.
+The producer normalizes upstream e-commerce payloads into this stable schema.
+Keeping a stable schema means the stream processor doesn't break if the upstream
+API shape changes. This makes the pipeline ready for product events, order
+updates, or customer activity streams.
 
 ## Tests
 
 Unit tests (pytest) cover the schema mapping and both Lambda handlers — no AWS or
-network access (boto3 clients and the weather API are mocked/stubbed):
+network access (boto3 clients are mocked/stubbed):
 
 ```bash
 pip install -r requirements-dev.txt
 pytest
 ```
 
-`tests/` contains `test_weather_schema.py`, `test_weather_producer.py` and
-`test_stream_processor.py` (config loading, location parsing, URL building,
-fetch/normalize, SQS sends, decode/validate, partitioning, and the
-end-to-end handler paths including dropped-record and S3-failure cases).
+The test suite covers config loading, product parsing, event generation, SQS
+sends, decode/validate, partitioning, and the end-to-end handler paths
+including dropped-record and S3-failure cases.
 
 ## Notes
 
