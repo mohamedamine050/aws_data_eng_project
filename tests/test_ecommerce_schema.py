@@ -55,3 +55,20 @@ def test_normalize_record_falls_back_to_now_without_time():
     del event["occurred_at"]
     rec = normalize_record(_sample_product(), event, "mobile")
     assert "T" in rec["occurred_at"]
+
+
+def test_normalize_record_supports_new_api_product_shape():
+    product = {
+        "id": 7,
+        "title": "Handmade Frozen Table",
+        "price": 15.5,
+        "category": {"name": "Home"},
+    }
+    event = _sample_event()
+
+    rec = normalize_record(product, event, "web")
+
+    assert rec["product"]["product_id"] == "7"
+    assert rec["product"]["name"] == "Handmade Frozen Table"
+    assert rec["product"]["category"] == "Home"
+    assert rec["product"]["price"] == 15.5

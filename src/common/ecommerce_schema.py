@@ -32,7 +32,16 @@ def _to_utc_iso(time_str: Optional[str]) -> str:
 def normalize_record(product: Dict[str, Any], event: Dict[str, Any], channel: str) -> Dict[str, Any]:
     """Map an e-commerce event to our stable event schema."""
     occurred_at = _to_utc_iso(event.get("occurred_at"))
-    product_id = product.get("product_id") or product.get("sku") or "unknown"
+    product_id = product.get("product_id") or product.get("sku") or product.get("id") or "unknown"
+    if product_id is not None:
+        product_id = str(product_id)
+
+    category = product.get("category")
+    if isinstance(category, dict):
+        category_name = category.get("name")
+    else:
+        category_name = category
+
     event_type = event.get("event_type") or "unknown"
 
     return {
@@ -44,9 +53,9 @@ def normalize_record(product: Dict[str, Any], event: Dict[str, Any], channel: st
         "event_type": event_type,
         "product": {
             "product_id": product_id,
-            "sku": product.get("sku"),
-            "name": product.get("name"),
-            "category": product.get("category"),
+            "sku": product.get("sku") or product.get("id"),
+            "name": product.get("title") or product.get("name"),
+            "category": category_name,
             "price": product.get("price"),
         },
         "customer": {

@@ -67,12 +67,27 @@ def resolve_products(config_products: Optional[List[Dict[str, Any]]], api_url: O
             with urllib.request.urlopen(api_url, timeout=10) as response:
                 payload = json.loads(response.read().decode("utf-8"))
             source = []
-            for entry in payload:
+            if isinstance(payload, list):
+                items = payload
+            elif isinstance(payload, dict):
+                items = payload.get("products") or payload.get("data") or []
+            else:
+                LOGGER.warning("Unexpected product payload type from %s: %s", api_url, type(payload).__name__)
+                items = []
+
+            for entry in items:
+                if not isinstance(entry, dict):
+                    continue
+                category = entry.get("category") or {}
+                if isinstance(category, dict):
+                    category_name = category.get("name")
+                else:
+                    category_name = None
                 source.append({
                     "product_id": str(entry.get("id") or entry.get("product_id") or entry.get("sku") or ""),
                     "sku": entry.get("sku") or entry.get("id"),
                     "name": entry.get("title") or entry.get("name"),
-                    "category": entry.get("category"),
+                    "category": category_name,
                     "price": entry.get("price"),
                 })
         except (urllib.error.URLError, urllib.error.HTTPError, TimeoutError, ValueError, json.JSONDecodeError) as exc:

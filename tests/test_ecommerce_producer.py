@@ -87,7 +87,7 @@ def test_resolve_products_from_api_url(producer, monkeypatch):
 
         def read(self):
             return json.dumps([
-                {"id": 1, "title": "Widget", "category": "electronics", "price": 12.34},
+                {"id": 1, "title": "Widget", "category": {"name": "Electronics"}, "price": 12.34},
             ]).encode("utf-8")
 
     def fake_urlopen(url, timeout=10):
@@ -98,6 +98,33 @@ def test_resolve_products_from_api_url(producer, monkeypatch):
     products = producer.resolve_products(None, api_url="https://example.test/products")
     assert products[0]["name"] == "Widget"
     assert products[0]["price"] == 12.34
+    assert products[0]["category"] == "Electronics"
+
+
+def test_resolve_products_from_api_url_supports_wrapped_payload(producer, monkeypatch):
+    class FakeResponse:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, exc_type, exc, tb):
+            return False
+
+        def read(self):
+            return json.dumps({
+                "products": [
+                    {"id": 2, "name": "Lamp", "category": {"name": "Home"}, "price": 8.5},
+                ]
+            }).encode("utf-8")
+
+    def fake_urlopen(url, timeout=10):
+        assert url == "https://example.test/products"
+        return FakeResponse()
+
+    monkeypatch.setattr(producer.urllib.request, "urlopen", fake_urlopen)
+    products = producer.resolve_products(None, api_url="https://example.test/products")
+    assert products[0]["name"] == "Lamp"
+    assert products[0]["price"] == 8.5
+    assert products[0]["category"] == "Home"
 
 
 def test_lambda_handler_uses_config_file_for_api_url_only(producer, monkeypatch, tmp_path):
