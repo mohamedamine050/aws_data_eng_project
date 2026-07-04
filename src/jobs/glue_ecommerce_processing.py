@@ -7,19 +7,25 @@ Implements data engineering best practices:
   - Business transformations
   - Quality metrics & logging
 """
-
 from __future__ import annotations
 
 import hashlib
 import json
 import logging
 import os
+import sys
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Set, Tuple
 from urllib.parse import urlparse
 
 import boto3
+
+try:
+    from awsglue.utils import getResolvedOptions
+except ImportError:  # pragma: no cover - local/test environment
+    def getResolvedOptions(_args: List[str], _required: List[str]) -> Dict[str, str]:
+        return {name: "" for name in _required}
 
 LOGGER = logging.getLogger(__name__)
 logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(levelname)s - %(message)s")
@@ -297,9 +303,6 @@ def run_job(input_prefix: str, output_prefix: str, local_fs: bool = False) -> Di
 
 
 if __name__ == "__main__":
-    from awsglue.utils import getResolvedOptions
-    import sys
-
     # Récupère les arguments Glue correctement
     glue_args = getResolvedOptions(sys.argv, ["CONFIG_PATH"])
 

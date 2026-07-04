@@ -4,6 +4,7 @@ import importlib.util
 import json
 import os
 import sys
+from datetime import datetime, timezone
 from pathlib import Path
 
 import pytest
@@ -77,6 +78,47 @@ def test_resolve_products_skips_malformed(producer):
     assert [product["product_id"] for product in products] == ["sku-1"]
 
 
+def test_resolve_products_from_api_url(producer, monkeypatch):
+    class FakeResponse:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, exc_type, exc, tb):
+            return False
+
+        def read(self):
+            return json.dumps([
+                {"id": 1, "title": "Widget", "category": "electronics", "price": 12.34},
+            ]).encode("utf-8")
+
+    def fake_urlopen(url, timeout=10):
+        assert url == "https://example.test/products"
+        return FakeResponse()
+
+    monkeypatch.setattr(producer.urllib.request, "urlopen", fake_urlopen)
+    products = producer.resolve_products(None, api_url="https://example.test/products")
+    assert products[0]["name"] == "Widget"
+    assert products[0]["price"] == 12.34
+
+
+def test_lambda_handler_uses_config_file_for_api_url_only(producer, monkeypatch, tmp_path):
+    cfg = tmp_path / "prod.json"
+    cfg.write_text(json.dumps({"QUEUE_URL": "https://sqs/demo"}), encoding="utf-8")
+
+    monkeypatch.setenv("ECOMMERCE_API_URL", "https://env.example/products")
+    calls = []
+
+    def fail_urlopen(*args, **kwargs):
+        calls.append((args, kwargs))
+        raise AssertionError("environment fallback should not be used")
+
+    monkeypatch.setattr(producer.urllib.request, "urlopen", fail_urlopen)
+    result = producer.lambda_handler({"CONFIG_PATH": str(cfg)}, None)
+
+    assert result["generated"] == len(producer.DEFAULT_PRODUCTS)
+    assert calls == []
+
+
 # ── EXTRACT ──────────────────────────────────────────────────
 
 def test_fetch_event_ok(producer):
@@ -86,6 +128,12 @@ def test_fetch_event_ok(producer):
     assert rec["product"]["product_id"] == "sku-1"
     assert rec["product"]["name"] == "Keyboard"
 
+def test_fetch_event_uses_current_timestamp(producer):
+    product = {"product_id": "sku-1", "name": "Keyboard", "category": "electronics", "price": 19.99}
+    rec = producer.fetch_event(product, "web", 10)
+    occurred_at = datetime.fromisoformat(rec["occurred_at"])
+    now = datetime.now(timezone.utc)
+    assert abs((occurred_at - now).total_seconds()) < 15
 
 # ── LOAD (SQS) ───────────────────────────────────────────────
 

@@ -19,7 +19,10 @@ from __future__ import annotations
 import json
 import logging
 import os
+import urllib.error
 import urllib.parse
+import urllib.request
+from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional
 
 import boto3
@@ -61,8 +64,28 @@ def _slugify(name: str, category: Optional[str]) -> str:
     return f"{base}-{category.strip().lower()}" if category else base
 
 
-def resolve_products(config_products: Optional[List[Dict[str, Any]]]) -> List[Dict[str, Any]]:
-    source = config_products if config_products else DEFAULT_PRODUCTS
+def resolve_products(config_products: Optional[List[Dict[str, Any]]], api_url: Optional[str] = None) -> List[Dict[str, Any]]:
+    if config_products:
+        source = config_products
+    elif api_url:
+        try:
+            with urllib.request.urlopen(api_url, timeout=10) as response:
+                payload = json.loads(response.read().decode("utf-8"))
+            source = []
+            for entry in payload:
+                source.append({
+                    "product_id": str(entry.get("id") or entry.get("product_id") or entry.get("sku") or ""),
+                    "sku": entry.get("sku") or entry.get("id"),
+                    "name": entry.get("title") or entry.get("name"),
+                    "category": entry.get("category"),
+                    "price": entry.get("price"),
+                })
+        except (urllib.error.URLError, urllib.error.HTTPError, TimeoutError, ValueError, json.JSONDecodeError) as exc:
+            LOGGER.warning("Failed to load products from %s: %s", api_url, exc)
+            source = DEFAULT_PRODUCTS
+    else:
+        source = DEFAULT_PRODUCTS
+
     products: List[Dict[str, Any]] = []
     for entry in source:
         try:
@@ -80,9 +103,10 @@ def resolve_products(config_products: Optional[List[Dict[str, Any]]]) -> List[Di
 
 def fetch_event(product: Dict[str, Any], channel: str, timeout: int) -> Optional[Dict[str, Any]]:
     del timeout
+    occurred_at = datetime.now(timezone.utc).replace(microsecond=0).isoformat()
     event = {
         "event_type": "product_viewed",
-        "occurred_at": "2026-06-24T12:00:00+00:00",
+        "occurred_at": occurred_at,
         "customer_id": "cust-demo",
         "segment": "new",
         "currency": "EUR",
@@ -121,7 +145,8 @@ def lambda_handler(event: Dict[str, Any], context: Any) -> Dict[str, Any]:  # no
         raise RuntimeError("QUEUE_URL is missing from the config.")
 
     channel = config.get("CHANNEL", "web")
-    products = resolve_products(config.get("PRODUCTS"))
+    api_url = config.get("ECOMMERCE_API_URL")
+    products = resolve_products(config.get("PRODUCTS"), api_url=api_url)
 
     records: List[Dict[str, Any]] = []
     for product in products:
