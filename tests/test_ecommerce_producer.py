@@ -56,10 +56,9 @@ def test_slugify(producer):
     assert producer._slugify("Keyboard", None) == "keyboard"
 
 
-def test_resolve_products_defaults(producer):
+def test_resolve_products_without_sources_returns_empty(producer):
     products = producer.resolve_products(None)
-    assert len(products) == len(producer.DEFAULT_PRODUCTS)
-    assert all("product_id" in product for product in products)
+    assert products == []
 
 
 def test_resolve_products_custom(producer):
@@ -115,7 +114,7 @@ def test_lambda_handler_uses_config_file_for_api_url_only(producer, monkeypatch,
     monkeypatch.setattr(producer.urllib.request, "urlopen", fail_urlopen)
     result = producer.lambda_handler({"CONFIG_PATH": str(cfg)}, None)
 
-    assert result["generated"] == len(producer.DEFAULT_PRODUCTS)
+    assert result["generated"] == 0
     assert calls == []
 
 
@@ -188,6 +187,10 @@ def test_lambda_handler_end_to_end(producer, monkeypatch, tmp_path):
     cfg.write_text(json.dumps({
         "QUEUE_URL": "https://sqs/demo",
         "PRODUCTS": [{"product_id": "sku-1", "name": "Keyboard", "category": "electronics", "price": 19.99}],
+        "EVENT_TYPE": "custom_event",
+        "CUSTOMER_ID": "cust-42",
+        "CUSTOMER_SEGMENT": "vip",
+        "CURRENCY": "USD",
     }), encoding="utf-8")
 
     sent = []

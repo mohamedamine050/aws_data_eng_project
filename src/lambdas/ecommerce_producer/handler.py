@@ -33,11 +33,6 @@ from common.ecommerce_schema import normalize_record
 LOGGER = logging.getLogger()
 LOGGER.setLevel(os.environ.get("LOG_LEVEL", "INFO"))
 
-DEFAULT_PRODUCTS = [
-    {"product_id": "sku-1001", "sku": "SKU-1001", "name": "Wireless Mouse", "category": "electronics", "price": 49.99},
-    {"product_id": "sku-1002", "sku": "SKU-1002", "name": "Mechanical Keyboard", "category": "electronics", "price": 89.99},
-]
-
 _SQS = boto3.client("sqs")
 SQS_BATCH_SIZE = 10
 
@@ -82,9 +77,9 @@ def resolve_products(config_products: Optional[List[Dict[str, Any]]], api_url: O
                 })
         except (urllib.error.URLError, urllib.error.HTTPError, TimeoutError, ValueError, json.JSONDecodeError) as exc:
             LOGGER.warning("Failed to load products from %s: %s", api_url, exc)
-            source = DEFAULT_PRODUCTS
+            source = []
     else:
-        source = DEFAULT_PRODUCTS
+        source = []
 
     products: List[Dict[str, Any]] = []
     for entry in source:
@@ -101,15 +96,16 @@ def resolve_products(config_products: Optional[List[Dict[str, Any]]], api_url: O
     return products
 
 
-def fetch_event(product: Dict[str, Any], channel: str, timeout: int) -> Optional[Dict[str, Any]]:
+def fetch_event(product: Dict[str, Any], channel: str, timeout: int, config: Optional[Dict[str, Any]] = None) -> Optional[Dict[str, Any]]:
     del timeout
     occurred_at = datetime.now(timezone.utc).replace(microsecond=0).isoformat()
+    config = config or {}
     event = {
-        "event_type": "product_viewed",
+        "event_type": config.get("EVENT_TYPE", "product_viewed"),
         "occurred_at": occurred_at,
-        "customer_id": "cust-demo",
-        "segment": "new",
-        "currency": "EUR",
+        "customer_id": config.get("CUSTOMER_ID", "cust-demo"),
+        "segment": config.get("CUSTOMER_SEGMENT", "new"),
+        "currency": config.get("CURRENCY", "EUR"),
         "amount": product.get("price"),
     }
     return normalize_record(product, event, channel)
@@ -150,7 +146,7 @@ def lambda_handler(event: Dict[str, Any], context: Any) -> Dict[str, Any]:  # no
 
     records: List[Dict[str, Any]] = []
     for product in products:
-        rec = fetch_event(product, channel, 10)
+        rec = fetch_event(product, channel, 10, config=config)
         if rec is not None:
             records.append(rec)
 
