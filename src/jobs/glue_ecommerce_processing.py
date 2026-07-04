@@ -297,9 +297,21 @@ def run_job(input_prefix: str, output_prefix: str, local_fs: bool = False) -> Di
 
 
 if __name__ == "__main__":
-    args = get_args({})
+    from awsglue.utils import getResolvedOptions
+    import sys
+
+    # Récupère les arguments Glue correctement
+    glue_args = getResolvedOptions(sys.argv, ["CONFIG_PATH"])
+
+    # Injecte les arguments dans ton parser
+    args = get_args(glue_args)
+
+    # Charge config S3/local
     config = load_config(args["CONFIG_PATH"])
+
     input_prefix = config.get("RAW_PREFIX", "raw/")
     output_prefix = config.get("PROCESSED_PREFIX", "processed/")
+
     result = run_job(input_prefix, output_prefix)
+
     print(json.dumps(result, indent=2))
