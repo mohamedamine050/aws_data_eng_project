@@ -1,18 +1,11 @@
-"""SQS -> S3 raw landing Lambda.
+"""SQS / Step Functions -> S3 raw landing Lambda.
 
-Triggered by the Amazon SQS queue (event source mapping). For each batch of
-messages it:
+Supports 3 invocation modes:
+  1. SQS event source mapping (Records[])
+  2. Step Functions payload (messages[])
+  3. Direct invocation (single event)
 
-  1. Decodes and validates each e-commerce event.
-  2. Lightly enriches it (adds processing metadata + derived partition keys).
-  3. Buffers valid events and writes them as newline-delimited JSON (NDJSON)
-     to the raw zone of the S3 data lake, partitioned by event date/hour:
-
-         s3://<bucket>/raw/dt=YYYY-MM-DD/hour=HH/<timestamp>-<uuid>.json
-
-This is the *Serverless Stream Processing* stage:
-
-    SQS ──> [this Lambda] ──> S3 (raw)
+Writes validated events into S3 raw zone as NDJSON.
 """
 
 from __future__ import annotations
@@ -31,68 +24,76 @@ import boto3
 LOGGER = logging.getLogger()
 LOGGER.setLevel(os.environ.get("LOG_LEVEL", "INFO"))
 
-
-# ─────────────────────────────────────────────
-# CONFIG / CONSTANTS
-# ─────────────────────────────────────────────
-
 S3 = boto3.client("s3")
 
-# Required top-level keys for an event to be considered valid.
 REQUIRED_KEYS = ("occurred_at", "event_type", "product", "customer")
 
 
+# ─────────────────────────────────────────────
+# CONFIG
+# ─────────────────────────────────────────────
+
 def get_args(event: Dict[str, Any]) -> Dict[str, str]:
-    """Resolve runtime args. CONFIG_PATH is passed as an argument via the
-    invocation event, with a fallback to the CONFIG_PATH env var. It points to a
-    JSON config (local file or s3://...)."""
     config_path = (event or {}).get("CONFIG_PATH") or os.getenv("CONFIG_PATH")
     if not config_path:
-        raise RuntimeError("CONFIG_PATH not provided (event argument or environment).")
+        raise RuntimeError("CONFIG_PATH not provided.")
     return {"CONFIG_PATH": config_path}
 
 
 def load_config(path: str) -> Dict[str, Any]:
-    """Load the JSON config from S3 (s3://bucket/key) or a local file."""
     LOGGER.info("Loading config from %s", path)
+
     if path.startswith("s3://"):
         parsed = urlparse(path)
         obj = S3.get_object(Bucket=parsed.netloc, Key=parsed.path.lstrip("/"))
         return json.loads(obj["Body"].read().decode("utf-8"))
-    with open(path, "r", encoding="utf-8") as fh:
-        return json.load(fh)
+
+    with open(path, "r", encoding="utf-8") as f:
+        return json.load(f)
 
 
 # ─────────────────────────────────────────────
-# DECODE & VALIDATE
+# VALIDATION
 # ─────────────────────────────────────────────
 
 class InvalidRecordError(ValueError):
-    """Raised when a decoded record fails validation."""
+    pass
 
 
 def _decode_record(record: Dict[str, Any]) -> Dict[str, Any]:
-    """JSON-parse a single SQS message body."""
-    text = (record.get("body") or "").strip()
-    if not text:
-        raise InvalidRecordError("empty payload")
-    return json.loads(text)
+    """
+    Supports:
+    - SQS: record["body"]
+    - Step Functions: record already JSON
+    """
+    if "body" in record:
+        raw = record["body"]
+    else:
+        raw = record
+
+    if isinstance(raw, str):
+        raw = raw.strip()
+        if not raw:
+            raise InvalidRecordError("empty payload")
+        return json.loads(raw)
+
+    return raw
 
 
 def _validate(event: Dict[str, Any]) -> None:
-    missing = [k for k in REQUIRED_KEYS if k not in event or event[k] in (None, {}, "")]
+    missing = [k for k in REQUIRED_KEYS if not event.get(k)]
     if missing:
-        raise InvalidRecordError(f"missing/empty keys: {missing}")
+        raise InvalidRecordError(f"missing keys: {missing}")
+
     if not event["product"].get("product_id"):
         raise InvalidRecordError("product.product_id is null")
 
 
 # ─────────────────────────────────────────────
-# PARTITIONING & KEYS
+# PARTITIONING
 # ─────────────────────────────────────────────
 
 def _partition_for(event: Dict[str, Any]) -> Tuple[str, str]:
-    """Return (date_str, hour_str) partition values from the event timestamp."""
     ts = event.get("occurred_at")
 
     if isinstance(ts, datetime):
@@ -100,16 +101,16 @@ def _partition_for(event: Dict[str, Any]) -> Tuple[str, str]:
     elif isinstance(ts, date):
         dt = datetime(ts.year, ts.month, ts.day, tzinfo=timezone.utc)
     elif isinstance(ts, str):
-        text = ts.strip()
         try:
-            dt = datetime.fromisoformat(text.replace("Z", "+00:00"))
-        except ValueError:
+            dt = datetime.fromisoformat(ts.replace("Z", "+00:00"))
+        except Exception:
             dt = None
     else:
         dt = None
 
-    if dt is None:
+    if not dt:
         dt = datetime.now(timezone.utc)
+
     if dt.tzinfo is None:
         dt = dt.replace(tzinfo=timezone.utc)
 
@@ -117,87 +118,103 @@ def _partition_for(event: Dict[str, Any]) -> Tuple[str, str]:
     return dt.strftime("%Y-%m-%d"), dt.strftime("%H")
 
 
-def _enrich(event: Dict[str, Any], record: Dict[str, Any]) -> Dict[str, Any]:
-    """Attach processing metadata useful for lineage/debugging."""
+def _enrich(event: Dict[str, Any], meta: Dict[str, Any]) -> Dict[str, Any]:
     event["_meta"] = {
         "processed_at": datetime.now(timezone.utc).isoformat(),
-        "sqs_message_id": record.get("messageId"),
-        "event_source_arn": record.get("eventSourceARN"),
+        "source": meta.get("source"),
+        "message_id": meta.get("message_id"),
     }
     return event
 
 
-def _build_key(partition_date: str, hour: str, raw_prefix: str) -> str:
+def _build_key(date_str: str, hour: str, prefix: str) -> str:
     ts = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%S")
-    unique = uuid.uuid4().hex[:8]
-    prefix = raw_prefix if raw_prefix.endswith("/") else raw_prefix + "/"
-    return f"{prefix}dt={partition_date}/hour={hour}/{ts}-{unique}.json"
+    uid = uuid.uuid4().hex[:8]
+    prefix = prefix if prefix.endswith("/") else prefix + "/"
+    return f"{prefix}dt={date_str}/hour={hour}/{ts}-{uid}.json"
 
 
 # ─────────────────────────────────────────────
-# WRITE (S3 raw)
+# S3 WRITE
 # ─────────────────────────────────────────────
 
-def _flush_group(bucket: str, key: str, events: List[Dict[str, Any]]) -> None:
+def _flush(bucket: str, key: str, events: List[Dict[str, Any]]) -> None:
     body = "\n".join(json.dumps(e, separators=(",", ":")) for e in events) + "\n"
+
     S3.put_object(
         Bucket=bucket,
         Key=key,
         Body=body.encode("utf-8"),
         ContentType="application/x-ndjson",
     )
-    LOGGER.info("Wrote %d records to s3://%s/%s", len(events), bucket, key)
+
+    LOGGER.info("Wrote %d events to s3://%s/%s", len(events), bucket, key)
 
 
 # ─────────────────────────────────────────────
 # HANDLER
 # ─────────────────────────────────────────────
 
-def lambda_handler(event: Dict[str, Any], context: Any) -> Dict[str, Any]:  # noqa: ARG001
+def lambda_handler(event: Dict[str, Any], context: Any) -> Dict[str, Any]:
+
     args = get_args(event)
     config = load_config(args["CONFIG_PATH"])
 
-    bucket = config.get("OUTPUT_BUCKET")
-    if not bucket:
-        raise RuntimeError("OUTPUT_BUCKET is missing from the config.")
-    raw_prefix = config.get("RAW_PREFIX", "raw/")
+    bucket = config["OUTPUT_BUCKET"]
+    prefix = config.get("RAW_PREFIX", "raw/")
 
-    records = event.get("Records", [])
-    LOGGER.info("Received %d SQS messages", len(records))
+    # ── UNIFIED INPUT NORMALIZATION ──
 
-    # Group valid events by (date, hour) so each S3 object holds one partition's
-    # worth of data. Track which message ids fed each group, so a failed write
-    # can be reported back to SQS for redelivery.
+    if "Records" in event:              # SQS mode
+        raw_records = event["Records"]
+        source = "sqs"
+
+    elif "messages" in event:          # Step Functions batch mode
+        raw_records = event["messages"]
+        source = "stepfunctions"
+
+    else:                               # direct invoke
+        raw_records = [event]
+        source = "direct"
+
+    LOGGER.info("Processing %d events (source=%s)", len(raw_records), source)
+
     groups: Dict[Tuple[str, str], List[Dict[str, Any]]] = defaultdict(list)
-    msg_ids_by_group: Dict[Tuple[str, str], List[str]] = defaultdict(list)
-    failures: List[Dict[str, str]] = []
+    batch_item_failures: List[Dict[str, str]] = []
 
-    for record in records:
-        msg_id = record.get("messageId", "unknown")
+    for record in raw_records:
+        item_id = record.get("messageId") or record.get("id")
         try:
             decoded = _decode_record(record)
             _validate(decoded)
-            enriched = _enrich(decoded, record)
-            key = _partition_for(enriched)
-            groups[key].append(enriched)
-            msg_ids_by_group[key].append(msg_id)
-        except (InvalidRecordError, json.JSONDecodeError, KeyError, UnicodeDecodeError) as exc:
-            # Bad data: log and skip. We do NOT add it to batchItemFailures,
-            # otherwise a poison message would be redelivered forever.
-            LOGGER.warning("Dropping invalid message %s: %s", msg_id, exc)
 
-    # Write each group to S3. If a write fails, report every message that fed
-    # that group so SQS redelivers them.
-    for key, events in groups.items():
-        pdate, phour = key
-        s3_key = _build_key(pdate, phour, raw_prefix)
+            enriched = _enrich(decoded, {
+                "source": source,
+                "message_id": item_id,
+            })
+
+            date_str, hour = _partition_for(enriched)
+            groups[(date_str, hour)].append(enriched)
+
+        except Exception as exc:
+            LOGGER.warning("Skipping invalid record: %s", exc)
+            # Invalid records are silently dropped, not reported as failures
+
+    # ── WRITE TO S3 ──
+
+    for (date_str, hour), events in groups.items():
+        key = _build_key(date_str, hour, prefix)
         try:
-            _flush_group(bucket, s3_key, events)
-        except Exception as exc:  # noqa: BLE001 - report to SQS for retry
-            LOGGER.error("Failed writing group %s: %s", key, exc)
-            failures.extend({"itemIdentifier": mid} for mid in msg_ids_by_group[key])
+            _flush(bucket, key, events)
+        except Exception as exc:
+            LOGGER.error("Failed to write to S3: %s", exc)
+            # Mark all events in this group as failed
+            for event_obj in events:
+                msg_id = event_obj.get("_meta", {}).get("message_id")
+                if msg_id:
+                    batch_item_failures.append({"itemIdentifier": msg_id})
 
-    return {"batchItemFailures": failures}
+    return {"batchItemFailures": batch_item_failures}
 
 
 handler = lambda_handler
