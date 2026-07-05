@@ -126,12 +126,19 @@ def _enrich(event: Dict[str, Any], meta: Dict[str, Any]) -> Dict[str, Any]:
     }
     return event
 
-
-def _build_key(date_str: str, hour: str, prefix: str) -> str:
+def _build_key(prefix: str) -> str:
+    """Build S3 key.
+    
+    Args:
+        prefix: S3 prefix (e.g., "raw/" or "raw")
+    
+    Returns:
+        S3 key like: raw/20260624T151234-a1b2c3d4.json
+    """
     ts = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%S")
     uid = uuid.uuid4().hex[:8]
-    prefix = prefix if prefix.endswith("/") else prefix + "/"
-    return f"{prefix}dt={date_str}/hour={hour}/{ts}-{uid}.json"
+    prefix = prefix.rstrip("/") + "/"
+    return f"{prefix}{ts}-{uid}.json"
 
 
 # ─────────────────────────────────────────────
@@ -184,6 +191,7 @@ def lambda_handler(event: Dict[str, Any], context: Any) -> Dict[str, Any]:
 
     for record in raw_records:
         item_id = record.get("messageId") or record.get("id")
+
         try:
             decoded = _decode_record(record)
             _validate(decoded)
@@ -198,21 +206,29 @@ def lambda_handler(event: Dict[str, Any], context: Any) -> Dict[str, Any]:
 
         except Exception as exc:
             LOGGER.warning("Skipping invalid record: %s", exc)
-            # Invalid records are silently dropped, not reported as failures
+            # invalid records ignored
 
     # ── WRITE TO S3 ──
 
-    for (date_str, hour), events in groups.items():
-        key = _build_key(date_str, hour, prefix)
+    all_events = []
+    for events in groups.values():
+        all_events.extend(events)
+
+    batch_item_failures: List[Dict[str, str]] = []
+    if all_events:
+        key = _build_key(prefix)
+
         try:
-            _flush(bucket, key, events)
+            _flush(bucket, key, all_events)
         except Exception as exc:
             LOGGER.error("Failed to write to S3: %s", exc)
-            # Mark all events in this group as failed
-            for event_obj in events:
+
+            for event_obj in all_events:
                 msg_id = event_obj.get("_meta", {}).get("message_id")
                 if msg_id:
-                    batch_item_failures.append({"itemIdentifier": msg_id})
+                    batch_item_failures.append({
+                        "itemIdentifier": msg_id
+                    })
 
     return {"batchItemFailures": batch_item_failures}
 

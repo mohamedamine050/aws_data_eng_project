@@ -114,14 +114,15 @@ def test_partition_for_datetime_object_uses_utc(processor):
 
 
 def test_build_key_format(processor):
-    key = processor._build_key("2026-06-24", "15", "raw/")
-    assert key.startswith("raw/dt=2026-06-24/hour=15/")
+    key = processor._build_key("raw/")
+    assert key.startswith("raw/")
     assert key.endswith(".json")
 
 
 def test_build_key_adds_trailing_slash(processor):
-    key = processor._build_key("2026-06-24", "15", "raw")
-    assert key.startswith("raw/dt=2026-06-24/")
+    key = processor._build_key("raw")
+    assert key.startswith("raw/")
+    assert key.endswith(".json")
 
 
 # ── HANDLER ──────────────────────────────────────────────────
@@ -143,7 +144,7 @@ def test_handler_writes_to_s3(processor, monkeypatch, tmp_path):
     assert result == {"batchItemFailures": []}
     assert len(puts) == 1
     assert puts[0]["Bucket"] == "demo-bucket"
-    assert puts[0]["Key"].startswith("raw/dt=")
+    assert puts[0]["Key"].startswith("raw/")
     assert puts[0]["Body"].decode("utf-8").count("\n") == 2
 
 
