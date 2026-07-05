@@ -1,0 +1,144 @@
+name: CI Pipeline
+
+on:
+  push:
+    branches:
+      - main
+    paths-ignore:
+      - '**'
+  workflow_dispatch:
+
+jobs:
+  unit-tests:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout Data Engineering Repo
+        uses: actions/checkout@v4
+        with:
+          repository: mohamedamine050/aws_data_eng_project
+          token: ${{ secrets.GH_TOKEN }}
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - run: |
+          pip install -r requirements-dev.txt
+          pip install pytest pytest-cov
+
+      - name: Run tests with coverage
+        run: |
+          pytest tests --cov=src --cov-report=xml --cov-report=term-missing
+
+      - name: Upload coverage report
+        uses: actions/upload-artifact@v4
+        with:
+          name: coverage-report
+          path: coverage.xml
+          retention-days: 30
+
+  sonar:
+    needs: unit-tests
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout Data Engineering Repo
+        uses: actions/checkout@v4
+        with:
+          repository: mohamedamine050/aws_data_eng_project
+          token: ${{ secrets.GH_TOKEN }}
+          fetch-depth: 0
+      - name: Download coverage report
+        uses: actions/download-artifact@v4
+        with:
+          name: coverage-report
+          path: .
+      - name: Verify coverage file
+        run: |
+          echo '=== Checking workspace ==='
+          ls -la
+          if [ -f coverage.xml ]; then
+            echo '✓ Coverage report found'
+            echo '=== Verifying paths in coverage.xml ==='
+            if grep -q '/home/runner/work' coverage.xml; then
+              echo '⚠ WARNING: Still contains absolute paths, fixing...'
+              sed -i 's|/home/runner/work/aws_data_eng_project/aws_data_eng_project/||g' coverage.xml
+            fi
+            echo '=== Coverage file (first 10 lines) ==='
+            head -10 coverage.xml
+          else
+            echo '✗ ERROR: coverage.xml not found!'
+            exit 1
+          fi
+      - name: SonarQube Scan
+        uses: SonarSource/sonarqube-scan-action@v3
+        with:
+          args: -Dsonar.projectKey=mohamedamine050_aws_data_eng_project -Dsonar.organization=mohamedamine050 -Dsonar.python.coverage.reportPaths=coverage.xml
+        env:
+          SONAR_TOKEN: ${{ secrets.SONAR_TOKEN }}
+          SONAR_HOST_URL: ${{ secrets.SONAR_HOST_URL }}
+      - name: Quality Gate check
+        uses: SonarSource/sonarqube-quality-gate-action@v1
+        timeout-minutes: 5
+        env:
+          SONAR_TOKEN: ${{ secrets.SONAR_TOKEN }}
+
+  infra-provisioning:
+    needs: sonar
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout Terraform Repo
+        uses: actions/checkout@v4
+        with:
+          repository: mohamedamine050/terraform-e-commerce-pipeline-4880cae2
+          token: ${{ secrets.GH_TOKEN }}
+
+      - name: Configure AWS Credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region: ${{ secrets.AWS_REGION }}
+
+
+      - uses: hashicorp/setup-terraform@v3
+
+      # BOOTSTRAP (S3 + DynamoDB)
+      # ─────────────────────────────
+      - name: Bootstrap Init
+        working-directory: bootstrap
+        run: terraform init
+
+      - name: Bootstrap Apply
+        working-directory: bootstrap
+        run: terraform apply -auto-approve
+
+      - name: Get Bootstrap Outputs
+        working-directory: bootstrap
+        run: |
+          S3_BUCKET=$(terraform output -raw s3_bucket_name || echo "")
+
+          if [ -z "$S3_BUCKET" ]; then
+            echo "ERROR: S3_BUCKET is empty"
+            exit 1
+          fi
+
+          echo "S3_BUCKET=$S3_BUCKET"
+          echo "S3_BUCKET=$S3_BUCKET" >> $GITHUB_ENV
+
+      - name: Infra apply
+        working-directory: infra
+        run: |
+          terraform init
+          terraform apply -auto-approve
+
+      - name: Terraform Output
+        working-directory: infra
+        run: terraform output -json > tf_output.json
+
+      - name: Upload Terraform Output
+        uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: terraform-output
+          path: infra/tf_output.json
+          retention-days: 30
