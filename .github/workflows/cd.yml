@@ -66,20 +66,7 @@ jobs:
           echo "S3_PATH_1=$S3_KEY_1" >> $GITHUB_ENV
 
 
-      - name: Build Glue dependencies
-        run: |
-          mkdir -p req
-          pip install -r requirements.txt -t req/ \
-            --no-binary psycopg2-binary
-
-      - name: Zip des libs
-        run: |
-          cd req
-          zip -r ../dependencies.zip .
-
-      - name: Upload dependencies to S3
-        run: |
-          aws s3 cp dependencies.zip s3://tfstate-e-commerce-pipeline-u0op6129/dependencies.zip
+      
 
       - name: Debug S3 path
         run: |
