@@ -201,15 +201,20 @@ def load_json(bucket: str, key: str):
     if not payload:
         return []
 
-    if payload.startswith("{") or payload.startswith("["):
+    try:
         return json.loads(payload)
+    except json.JSONDecodeError:
+        pass
 
     records = []
     for line in payload.splitlines():
         line = line.strip()
         if not line:
             continue
-        records.append(json.loads(line))
+        try:
+            records.append(json.loads(line))
+        except Exception as e:
+            logger.warning(f"Bad JSON line in {key}: {e}")
     return records
 
 
@@ -294,11 +299,14 @@ def run_job(input_prefix: str = None, output_prefix: str = None, bucket: str = N
                 logger.warning(f"Fichier ignoré {file_path}: {e}")
     else:
         files = list_s3_files(bucket, input_prefix)
+        logger.info(f"RAW FILES: {files}")
         for f in files:
             try:
                 raw_records.extend(_coerce_records(load_json(bucket, f)))
             except Exception as e:
                 logger.warning(f"Fichier ignoré {f}: {e}")
+
+    logger.info(f"RAW RECORDS COUNT: {len(raw_records)}")
     
     if not raw_records:
         logger.warning(f"Aucune donnée trouvée dans {input_prefix}")
@@ -325,7 +333,7 @@ def run_job(input_prefix: str = None, output_prefix: str = None, bucket: str = N
         is_valid, error = _validate_record(r)
         if not is_valid:
             invalid += 1
-            logger.debug(f"Enregistrement invalide: {error}")
+            logger.warning(f"Invalid record: {error} -> {r}")
             continue
         
         enriched = _enrich_record(r)
