@@ -1,3 +1,1 @@
-# The runtime code needs no third-party packages:
-# boto3 is provided by AWS Lambda runtime
 requests==2.33.0
