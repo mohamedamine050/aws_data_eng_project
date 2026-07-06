@@ -235,6 +235,31 @@ def write_json(bucket: str, key: str, data: dict) -> None:
     )
 
 
+def write_parquet(bucket: str, output_prefix: str, rows: list[dict]) -> str:
+    """Write processed records as a Parquet dataset in S3."""
+    from pyspark.sql import SparkSession
+    from pyspark.sql.types import DoubleType, StringType, StructField, StructType
+
+    schema = StructType([
+        StructField("event_type", StringType(), True),
+        StructField("product_id", StringType(), True),
+        StructField("product_name", StringType(), True),
+        StructField("product_price", DoubleType(), True),
+        StructField("customer_id", StringType(), True),
+        StructField("occurred_at", StringType(), True),
+        StructField("partition_date", StringType(), True),
+        StructField("partition_hour", StringType(), True),
+        StructField("price_category", StringType(), True),
+    ])
+
+    spark = SparkSession.builder.getOrCreate()
+    dataframe = spark.createDataFrame(rows, schema=schema)
+
+    output_path = f"s3://{bucket}/{output_prefix.rstrip('/')}/"
+    dataframe.write.mode("overwrite").partitionBy("partition_date", "partition_hour").parquet(output_path)
+    return output_path
+
+
 # ─────────────────────────────────────────────
 # LOCAL FILE HELPERS
 # ─────────────────────────────────────────────
@@ -359,16 +384,7 @@ def run_job(input_prefix: str = None, output_prefix: str = None, bucket: str = N
         })
         output_path = str(output_file)
     else:
-        output_key = f"{output_prefix.rstrip('/')}/processed_output.json"
-        write_json(bucket, output_key, {
-            "input_count": len(raw_records),
-            "valid_count": len(raw_records) - invalid,
-            "invalid_count": invalid,
-            "duplicate_count": duplicates,
-            "output_count": len(processed),
-            "data": processed
-        })
-        output_path = f"s3://{bucket}/{output_key}"
+        output_path = write_parquet(bucket, output_prefix, processed)
     
     quality_pct = 100.0 * len(processed) / len(raw_records) if raw_records else 0.0
     

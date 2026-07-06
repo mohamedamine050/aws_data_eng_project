@@ -261,8 +261,10 @@ def test_run_job_uses_s3_branch(monkeypatch):
     )
     monkeypatch.setattr(
         glue_job,
-        "write_json",
-        lambda bucket, key, data: captured.update({"bucket": bucket, "key": key, "data": data}),
+        "write_parquet",
+        lambda bucket, output_prefix, rows: captured.update(
+            {"bucket": bucket, "output_prefix": output_prefix, "rows": rows}
+        ) or f"s3://{bucket}/{output_prefix.rstrip('/')}/",
     )
 
     result = run_job(
@@ -273,10 +275,11 @@ def test_run_job_uses_s3_branch(monkeypatch):
     )
 
     assert result["status"] == "success"
-    assert result["output_path"] == "s3://demo-bucket/processed/processed_output.json"
+    assert result["output_path"] == "s3://demo-bucket/processed/"
     assert captured["bucket"] == "demo-bucket"
-    assert captured["key"] == "processed/processed_output.json"
-    assert captured["data"]["output_count"] == 1
+    assert captured["output_prefix"] == "processed/"
+    assert len(captured["rows"]) == 1
+    assert captured["rows"][0]["product_id"] == "sku-1"
 
 
 def test_run_job_processes_valid_records(tmp_path):
