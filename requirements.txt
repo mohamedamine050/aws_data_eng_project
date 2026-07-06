@@ -1,3 +1,1 @@
-# AWS Glue 4.0 already provides boto3, botocore, and urllib3.
-# Keep this file empty unless the Glue job needs an extra third-party package.
 requests==2.33.0
