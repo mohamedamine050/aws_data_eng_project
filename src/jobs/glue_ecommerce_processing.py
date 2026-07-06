@@ -182,6 +182,7 @@ def load_config(path: str) -> dict:
 # ─────────────────────────────────────────────
 
 def list_s3_files(bucket: str, prefix: str) -> list:
+    # raw/ peut contenir plusieurs fichiers .json; on les collecte tous avant traitement.
     keys = []
     paginator = s3.get_paginator("list_objects_v2")
 
@@ -193,9 +194,31 @@ def list_s3_files(bucket: str, prefix: str) -> list:
     return keys
 
 
-def load_json(bucket: str, key: str) -> dict:
+def load_json(bucket: str, key: str):
     obj = s3.get_object(Bucket=bucket, Key=key)
-    return json.loads(obj["Body"].read().decode("utf-8"))
+    payload = obj["Body"].read().decode("utf-8").strip()
+
+    if not payload:
+        return []
+
+    if payload.startswith("{") or payload.startswith("["):
+        return json.loads(payload)
+
+    records = []
+    for line in payload.splitlines():
+        line = line.strip()
+        if not line:
+            continue
+        records.append(json.loads(line))
+    return records
+
+
+def _coerce_records(payload):
+    if payload is None:
+        return []
+    if isinstance(payload, list):
+        return payload
+    return [payload]
 
 
 def write_json(bucket: str, key: str, data: dict) -> None:
@@ -273,7 +296,7 @@ def run_job(input_prefix: str = None, output_prefix: str = None, bucket: str = N
         files = list_s3_files(bucket, input_prefix)
         for f in files:
             try:
-                raw_records.append(load_json(bucket, f))
+                raw_records.extend(_coerce_records(load_json(bucket, f)))
             except Exception as e:
                 logger.warning(f"Fichier ignoré {f}: {e}")
     
@@ -368,10 +391,19 @@ if __name__ == "__main__":
     config_path = args["CONFIG_PATH"]
     config = load_config(config_path)
 
-    bucket = config.get("BUCKET", "pipeline-datalake-59jxhbtwnmv1k5ex")
+    bucket = config.get("OUTPUT_BUCKET")
     input_prefix = config.get("RAW_PREFIX", "raw/")
     output_prefix = config.get("PROCESSED_PREFIX", "processed/")
 
-    result = run_job(bucket, input_prefix, output_prefix)
+    logger.info(f"Bucket        : {bucket}")
+    logger.info(f"Input prefix  : {input_prefix}")
+    logger.info(f"Output prefix : {output_prefix}")
+
+    result = run_job(
+        input_prefix=input_prefix,
+        output_prefix=output_prefix,
+        bucket=bucket,
+        local_fs=False,
+    )
 
     print(json.dumps(result, indent=2))
