@@ -113,12 +113,6 @@ def test_partition_for_datetime_object_uses_utc(processor):
     assert processor._partition_for({"occurred_at": datetime(2026, 6, 24, 15, 30, tzinfo=timezone.utc)}) == ("2026-06-24", "15")
 
 
-def test_build_key_format(processor):
-    key = processor._build_key("raw/")
-    assert key.startswith("raw/")
-    assert key.endswith(".json")
-
-
 def test_build_key_adds_trailing_slash(processor):
     key = processor._build_key("raw")
     assert key.startswith("raw/")
@@ -144,13 +138,37 @@ def test_handler_writes_to_s3(processor, monkeypatch, tmp_path):
     assert result == {"batchItemFailures": []}
     assert len(puts) == 1
     assert puts[0]["Bucket"] == "demo-bucket"
-    assert puts[0]["Key"].startswith("raw/")
+    assert puts[0]["Key"].startswith("raw/")  # RAW_PREFIX in the config still wins
     assert puts[0]["Body"].decode("utf-8").count("\n") == 2
 
 
-def test_handler_drops_invalid_records(processor, monkeypatch, tmp_path):
+def test_handler_routes_invalid_records_to_rejected_zone(processor, monkeypatch, tmp_path):
+    """A bad record must never reach raw/, and must never be silently lost."""
     cfg = tmp_path / "sp.json"
     cfg.write_text(json.dumps({"OUTPUT_BUCKET": "b"}), encoding="utf-8")
+
+    puts = []
+    monkeypatch.setattr(processor.S3, "put_object", lambda **kw: puts.append(kw) or {})
+
+    bad = _valid_event()
+    del bad["product"]
+    event = {"CONFIG_PATH": str(cfg), "Records": [_sqs_record(bad)]}
+
+    result = processor.handler(event, None)
+
+    assert result == {"batchItemFailures": []}
+    assert not [p for p in puts if p["Key"].startswith("bronze/events/")]
+
+    rejected = [p for p in puts if p["Key"].startswith("quarantine/events/")]
+    assert len(rejected) == 1
+    archived = json.loads(rejected[0]["Body"].decode("utf-8").strip())
+    assert "schema_valid" in archived["reasons"]
+    assert archived["record"]["event_type"] == "product_viewed"
+
+
+def test_handler_drops_invalid_records_when_rejected_zone_disabled(processor, monkeypatch, tmp_path):
+    cfg = tmp_path / "sp.json"
+    cfg.write_text(json.dumps({"OUTPUT_BUCKET": "b", "REJECTED_PREFIX": ""}), encoding="utf-8")
 
     puts = []
     monkeypatch.setattr(processor.S3, "put_object", lambda **kw: puts.append(kw) or {})

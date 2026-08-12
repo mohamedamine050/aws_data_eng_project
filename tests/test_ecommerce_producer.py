@@ -51,11 +51,6 @@ def test_load_config_local_file(producer, tmp_path):
 
 # ── PRODUCTS ────────────────────────────────────────────────
 
-def test_slugify(producer):
-    assert producer._slugify("Wireless Mouse", "US") == "wireless-mouse-us"
-    assert producer._slugify("Keyboard", None) == "keyboard"
-
-
 def test_resolve_products_without_sources_returns_empty(producer):
     products = producer.resolve_products(None)
     assert products == []
@@ -90,8 +85,8 @@ def test_resolve_products_from_api_url(producer, monkeypatch):
                 {"id": 1, "title": "Widget", "category": {"name": "Electronics"}, "price": 12.34},
             ]).encode("utf-8")
 
-    def fake_urlopen(url, timeout=10):
-        assert url == "https://example.test/products"
+    def fake_urlopen(request, timeout=10):
+        assert request.full_url == "https://example.test/products"
         return FakeResponse()
 
     monkeypatch.setattr(producer.urllib.request, "urlopen", fake_urlopen)
@@ -116,8 +111,8 @@ def test_resolve_products_from_api_url_supports_wrapped_payload(producer, monkey
                 ]
             }).encode("utf-8")
 
-    def fake_urlopen(url, timeout=10):
-        assert url == "https://example.test/products"
+    def fake_urlopen(request, timeout=10):
+        assert request.full_url == "https://example.test/products"
         return FakeResponse()
 
     monkeypatch.setattr(producer.urllib.request, "urlopen", fake_urlopen)
@@ -225,5 +220,11 @@ def test_lambda_handler_end_to_end(producer, monkeypatch, tmp_path):
                         lambda QueueUrl, Entries: (sent.extend(Entries), {"Failed": []})[1])
 
     result = producer.lambda_handler({"CONFIG_PATH": str(cfg)}, None)
-    assert result == {"products_requested": 1, "generated": 1, "sent": 1, "failed": 0}
+    assert result["products_requested"] == 1
+    assert result["generated"] == 1
+    assert result["sent"] == 1
+    assert result["failed"] == 0
+    assert result["rejected"] == 0
+    assert result["mode"] == "legacy"
+    assert result["by_event_type"] == {"custom_event": 1}
     assert len(sent) == 1

@@ -1,0 +1,40 @@
+{
+  "_comment": "Glue job 3 \u2014 audit silver, quarantine failures, publish a report. Pass as --CONFIG_PATH.",
+  "OUTPUT_BUCKET": "my-data-lake",
+  "ENVIRONMENT": "dev",
+  "METRICS_ENABLED": true,
+  "METRICS_NAMESPACE": "Ecommerce/Pipeline",
+  "JOB_NAME": "ecommerce-quality-audit",
+  "PROCESS_DATE": null,
+  "_checks": "Added to the built-in set; a same-named entry overrides it.",
+  "QUALITY_CHECKS": [
+    {
+      "name": "eur_only",
+      "expr": "currency IS NULL OR currency = 'EUR'",
+      "severity": "warn",
+      "description": "This shop only sells in euros; anything else is a producer bug."
+    }
+  ],
+  "QUALITY_CHECKS_DISABLED": [],
+  "PROFILE_COLUMNS": [
+    "customer_id",
+    "product_price",
+    "order_id",
+    "session_id",
+    "campaign"
+  ],
+  "QUALITY": {
+    "min_pass_pct": 99.0,
+    "warn_pass_pct": 99.9,
+    "max_duplicate_pct": 1.0,
+    "min_records": 1,
+    "max_null_pct": {
+      "customer_id": 30.0,
+      "product_price": 10.0
+    }
+  },
+  "QUARANTINE_ENABLED": true,
+  "_fail": "true aborts the job on a breach, which stops the load downstream.",
+  "FAIL_ON_QUALITY": false,
+  "COALESCE": 4
+}

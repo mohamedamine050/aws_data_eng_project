@@ -1,0 +1,148 @@
+{
+  "Comment": "E-commerce medallion pipeline. Runs the five Glue jobs in dependency order, once per day. Replace <ACCOUNT> and the job names with your own. Trigger it from EventBridge (see eventbridge_rules.json).",
+  "StartAt": "IngestPartnerDrops",
+  "TimeoutSeconds": 10800,
+  "States": {
+    "IngestPartnerDrops": {
+      "Comment": "Job 1 \u2014 source 2. Reads whatever is waiting in landing/partners/, lifts it into v3 records and moves the files aside.",
+      "Type": "Task",
+      "Resource": "arn:aws:states:::glue:startJobRun.sync",
+      "Parameters": {
+        "JobName": "ecommerce-landing-ingest",
+        "Arguments": {
+          "--CONFIG_PATH": "s3://my-data-lake/config/glue_landing_ingest.json"
+        }
+      },
+      "Retry": [
+        {
+          "ErrorEquals": [
+            "States.TaskFailed"
+          ],
+          "IntervalSeconds": 60,
+          "MaxAttempts": 2,
+          "BackoffRate": 2.0
+        }
+      ],
+      "Catch": [
+        {
+          "Comment": "The streaming path keeps flowing without the file drops: a stale partner batch beats no facts at all.",
+          "ErrorEquals": [
+            "States.ALL"
+          ],
+          "ResultPath": "$.landingError",
+          "Next": "BronzeToSilver"
+        }
+      ],
+      "Next": "BronzeToSilver"
+    },
+    "BronzeToSilver": {
+      "Comment": "Job 2 \u2014 clean, type, deduplicate the event stream.",
+      "Type": "Task",
+      "Resource": "arn:aws:states:::glue:startJobRun.sync",
+      "Parameters": {
+        "JobName": "ecommerce-bronze-to-silver",
+        "Arguments": {
+          "--CONFIG_PATH": "s3://my-data-lake/config/glue_bronze_to_silver.json",
+          "--PROCESS_DATE.$": "$.process_date"
+        }
+      },
+      "Retry": [
+        {
+          "ErrorEquals": [
+            "States.TaskFailed"
+          ],
+          "IntervalSeconds": 120,
+          "MaxAttempts": 2,
+          "BackoffRate": 2.0
+        }
+      ],
+      "Next": "QualityAudit"
+    },
+    "QualityAudit": {
+      "Comment": "Job 3 \u2014 runs BEFORE gold on purpose: a bad silver partition must not be aggregated and published.",
+      "Type": "Task",
+      "Resource": "arn:aws:states:::glue:startJobRun.sync",
+      "Parameters": {
+        "JobName": "ecommerce-quality-audit",
+        "Arguments": {
+          "--CONFIG_PATH": "s3://my-data-lake/config/glue_quality_audit.json",
+          "--PROCESS_DATE.$": "$.process_date"
+        }
+      },
+      "Catch": [
+        {
+          "ErrorEquals": [
+            "States.ALL"
+          ],
+          "ResultPath": "$.qualityError",
+          "Next": "QualityGateFailed"
+        }
+      ],
+      "Next": "SilverToGold"
+    },
+    "SilverToGold": {
+      "Comment": "Job 4 \u2014 the six analytical tables.",
+      "Type": "Task",
+      "Resource": "arn:aws:states:::glue:startJobRun.sync",
+      "Parameters": {
+        "JobName": "ecommerce-silver-to-gold",
+        "Arguments": {
+          "--CONFIG_PATH": "s3://my-data-lake/config/glue_silver_to_gold.json",
+          "--PROCESS_DATE.$": "$.process_date"
+        }
+      },
+      "Retry": [
+        {
+          "ErrorEquals": [
+            "States.TaskFailed"
+          ],
+          "IntervalSeconds": 120,
+          "MaxAttempts": 2,
+          "BackoffRate": 2.0
+        }
+      ],
+      "Next": "LoadWarehouse"
+    },
+    "LoadWarehouse": {
+      "Comment": "Job 5 \u2014 publish to PostgreSQL. Last, so BI never sees a half-built day.",
+      "Type": "Task",
+      "Resource": "arn:aws:states:::glue:startJobRun.sync",
+      "Parameters": {
+        "JobName": "ecommerce-gold-to-postgres",
+        "Arguments": {
+          "--CONFIG_PATH": "s3://my-data-lake/config/glue_rds_load.json"
+        }
+      },
+      "Retry": [
+        {
+          "ErrorEquals": [
+            "States.TaskFailed"
+          ],
+          "IntervalSeconds": 180,
+          "MaxAttempts": 2,
+          "BackoffRate": 2.0
+        }
+      ],
+      "Next": "Succeeded"
+    },
+    "QualityGateFailed": {
+      "Comment": "Silver failed its audit. Gold and the warehouse are deliberately left untouched: yesterday's numbers are better than wrong ones.",
+      "Type": "Task",
+      "Resource": "arn:aws:states:::sns:publish",
+      "Parameters": {
+        "TopicArn": "arn:aws:sns:eu-west-3:<ACCOUNT>:data-pipeline-alerts",
+        "Subject": "Quality gate failed \u2014 gold not refreshed",
+        "Message.$": "States.JsonToString($)"
+      },
+      "Next": "Failed"
+    },
+    "Succeeded": {
+      "Type": "Succeed"
+    },
+    "Failed": {
+      "Type": "Fail",
+      "Error": "QualityGateFailed",
+      "Cause": "The silver partition breached its quality thresholds; see quality/dt=.../audit-*.json"
+    }
+  }
+}

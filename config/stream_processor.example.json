@@ -1,0 +1,15 @@
+{
+  "_comment": "Stream processor Lambda config. Set CONFIG_PATH as an env var here — the SQS/S3 trigger carries data, not config.",
+
+  "OUTPUT_BUCKET": "my-data-lake",
+
+  "_zones": "Medallion defaults: bronze/events/ and quarantine/events/. Set BRONZE_EVENTS_PREFIX / QUARANTINE_EVENTS_PREFIX to move them.",
+  "BRONZE_PREFIX": "bronze/",
+  "QUARANTINE_PREFIX": "quarantine/",
+
+  "_drop_rejects": "Set QUARANTINE_EVENTS_PREFIX to \"\" to drop failing records instead of archiving them.",
+
+  "ENVIRONMENT": "dev",
+  "METRICS_ENABLED": true,
+  "METRICS_NAMESPACE": "Ecommerce/Pipeline"
+}

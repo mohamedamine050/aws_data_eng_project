@@ -1,0 +1,54 @@
+{
+  "_comment": "Glue job 5 \u2014 silver + gold -> PostgreSQL warehouse. Pass as --CONFIG_PATH.",
+  "OUTPUT_BUCKET": "my-data-lake",
+  "ENVIRONMENT": "dev",
+  "METRICS_ENABLED": true,
+  "METRICS_NAMESPACE": "Ecommerce/Pipeline",
+  "JOB_NAME": "ecommerce-gold-to-postgres",
+  "_rds": "Credentials from Secrets Manager when RDS_SECRET_ARN is set; the explicit keys are a local-dev fallback.",
+  "RDS_SECRET_ARN": "arn:aws:secretsmanager:eu-west-3:123456789012:secret:ecommerce-warehouse",
+  "RDS_SCHEMA": "analytics",
+  "RDS_SSLMODE": "require",
+  "RDS_WRITE_MODE": "append",
+  "RDS_BATCH_SIZE": 10000,
+  "RDS_NUM_PARTITIONS": 8,
+  "RDS_TRUNCATE": true,
+  "_targets": "RDS_LOAD_ALL uses the default layout. To replay a partition of fact_events, point it at analytics.stg_fact_events and call analytics.merge_fact_events() \u2014 see sql/warehouse/003_upsert.sql.",
+  "RDS_TABLES": [
+    {
+      "dataset": "silver/events",
+      "table": "analytics.fact_events",
+      "mode": "append"
+    },
+    {
+      "dataset": "gold/sessions",
+      "table": "analytics.fact_sessions",
+      "mode": "overwrite"
+    },
+    {
+      "dataset": "gold/funnel_daily",
+      "table": "analytics.agg_funnel_daily",
+      "mode": "overwrite"
+    },
+    {
+      "dataset": "gold/orders",
+      "table": "analytics.fact_orders",
+      "mode": "overwrite"
+    },
+    {
+      "dataset": "gold/customer_rfm",
+      "table": "analytics.dim_customer_rfm",
+      "mode": "overwrite"
+    },
+    {
+      "dataset": "gold/product_daily",
+      "table": "analytics.agg_product_daily",
+      "mode": "overwrite"
+    },
+    {
+      "dataset": "gold/anomalies",
+      "table": "analytics.fact_anomalies",
+      "mode": "overwrite"
+    }
+  ]
+}

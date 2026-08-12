@@ -101,7 +101,7 @@ def test_load_config_s3(monkeypatch):
 def test_build_processed_path_defaults():
     config = {"OUTPUT_BUCKET": "my-bucket"}
 
-    assert glue_job._build_processed_path(config) == "s3://my-bucket/processed/"
+    assert glue_job._build_processed_path(config) == "s3://my-bucket/silver/events/"
 
 
 def test_build_processed_path_explicit():
@@ -111,8 +111,14 @@ def test_build_processed_path_explicit():
 
 
 def test_resolve_rds_settings_missing_raises():
-    with pytest.raises(ValueError, match="Missing RDS settings"):
-        glue_job._resolve_rds_settings({"RDS_TABLE": "events"})
+    """Naming the missing keys is the difference between a two-minute fix and
+    reading the whole config."""
+    with pytest.raises(ValueError) as excinfo:
+        glue_job._resolve_rds_settings({"RDS_HOST": "h", "RDS_TABLE": "events"})
+
+    message = str(excinfo.value)
+    assert "Missing RDS settings" in message
+    assert "RDS_DATABASE" in message and "RDS_PASSWORD" in message
 
 
 def test_parse_args_local(monkeypatch):
@@ -242,3 +248,90 @@ def test_load_secret(monkeypatch):
 
     assert result["username"] == "user"
     assert result["password"] == "pass"
+
+
+# ─────────────────────────────────────────────
+# CONNECTION DETAILS (inlined from the former postgres module)
+# ─────────────────────────────────────────────
+
+def test_secret_key_aliases_are_accepted(monkeypatch):
+    """RDS writes its secrets in more than one shape depending on how they were created."""
+    secret = {"hostname": "h", "database": "d", "user": "u", "password": "p"}
+    monkeypatch.setattr(glue_job, "_load_secret", lambda arn: secret)
+
+    settings = glue_job._resolve_rds_settings({"RDS_SECRET_ARN": "arn", "RDS_TABLE": "t"})
+
+    assert (settings["host"], settings["database"], settings["username"]) == ("h", "d", "u")
+
+
+def test_an_explicit_config_value_beats_the_secret(monkeypatch):
+    """A local override points a job at a tunnel without touching the secret."""
+    monkeypatch.setattr(glue_job, "_load_secret",
+                        lambda arn: {"host": "prod.example", "dbname": "d",
+                                     "username": "u", "password": "p"})
+
+    settings = glue_job._resolve_rds_settings(
+        {"RDS_SECRET_ARN": "arn", "RDS_HOST": "localhost", "RDS_TABLE": "t"})
+
+    assert settings["host"] == "localhost"
+
+
+def test_qualified_prefixes_the_schema_once():
+    settings = {"schema": "analytics"}
+
+    assert glue_job._qualified(settings, "fact_events") == "analytics.fact_events"
+    assert glue_job._qualified(settings, "other.fact_events") == "other.fact_events"
+    assert glue_job._qualified({}, "fact_events") == "fact_events"
+
+
+def _writer_settings(**overrides):
+    return {
+        "username": "u", "password": "p", "driver": "org.postgresql.Driver",
+        "write_mode": "append", "table": "fact_events", **overrides,
+    }
+
+
+class _Frame:
+    def __init__(self):
+        self.write = _Writer()
+
+    def count(self):
+        return 3
+
+
+class _Writer:
+    def __init__(self):
+        self.options = {}
+        self.mode_used = None
+
+    def format(self, _value):
+        return self
+
+    def option(self, key, value):
+        self.options[key] = value
+        return self
+
+    def mode(self, value):
+        self.mode_used = value
+        return self
+
+    def save(self):
+        pass
+
+
+def test_overwrite_can_be_told_to_recreate(monkeypatch):
+    monkeypatch.setattr(glue_job, "_build_jdbc_url", lambda settings: "jdbc:postgresql://h:5432/d")
+    frame = _Frame()
+
+    glue_job._write_to_rds(frame, _writer_settings(truncate=False), mode="overwrite")
+
+    assert "truncate" not in frame.write.options
+
+
+def test_the_configured_schema_qualifies_the_target(monkeypatch):
+    monkeypatch.setattr(glue_job, "_build_jdbc_url", lambda settings: "jdbc:postgresql://h:5432/d")
+    frame = _Frame()
+
+    glue_job._write_to_rds(frame, _writer_settings(schema="analytics"))
+
+    assert frame.write.options["dbtable"] == "analytics.fact_events"

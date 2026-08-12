@@ -1,0 +1,90 @@
+occurred_at,event_type,channel,session_id,device_type,country,city,product_id,product_name,category,brand,price,customer_id,segment,order_id,quantity,discount_pct,currency,payment_method,campaign,utm_source,utm_medium
+2026-06-24T08:18:35+00:00,product_viewed,mobile_app,sess-partner-035,mobile,FR,Marseille,sku-1007,Webcam 1080p,electronics,Lumen,74.90,cust-00006,loyal,,,,EUR,,spring_sale,google,cpc
+2026-06-24T08:20:37+00:00,add_to_cart,mobile_app,sess-partner-035,mobile,FR,Marseille,sku-1007,Webcam 1080p,electronics,Lumen,74.90,cust-00006,loyal,,3,,EUR,,spring_sale,google,cpc
+2026-06-24T08:38:48+00:00,product_viewed,mobile_app,sess-partner-000,mobile,CH,Zurich,sku-1003,"27"" 4K Monitor",electronics,Lumen,349.90,cust-00007,new,,,,EUR,,newsletter,email,newsletter
+2026-06-24T08:39:25+00:00,add_to_cart,mobile_app,sess-partner-000,mobile,CH,Zurich,sku-1003,"27"" 4K Monitor",electronics,Lumen,349.90,cust-00007,new,,3,,EUR,,newsletter,email,newsletter
+2026-06-24T08:41:49+00:00,checkout_started,mobile_app,sess-partner-000,mobile,CH,Zurich,sku-1003,"27"" 4K Monitor",electronics,Lumen,349.90,cust-00007,new,,2,,EUR,,newsletter,email,newsletter
+2026-06-24T08:45:22+00:00,product_viewed,web,sess-partner-027,desktop,FR,Lyon,sku-1006,Laptop Stand Alu,accessories,Portis,39.50,cust-00002,loyal,,,,EUR,,retargeting,meta,paid_social
+2026-06-24T08:45:23+00:00,order_placed,mobile_app,sess-partner-000,mobile,CH,Zurich,sku-1003,"27"" 4K Monitor",electronics,Lumen,349.90,cust-00007,new,ord-p00001,2,5,EUR,paypal,newsletter,email,newsletter
+2026-06-24T08:56:29+00:00,product_viewed,web,sess-partner-022,desktop,FR,Lyon,sku-1005,Noise-Cancelling Buds,audio,Sonar,179.00,cust-00002,loyal,,,,EUR,,newsletter,email,newsletter
+2026-06-24T08:57:31+00:00,add_to_cart,web,sess-partner-022,desktop,FR,Lyon,sku-1005,Noise-Cancelling Buds,audio,Sonar,179.00,cust-00002,loyal,,1,,EUR,,newsletter,email,newsletter
+2026-06-24T08:58:34+00:00,checkout_started,web,sess-partner-022,desktop,FR,Lyon,sku-1005,Noise-Cancelling Buds,audio,Sonar,179.00,cust-00002,loyal,,1,,EUR,,newsletter,email,newsletter
+2026-06-24T09:00:09+00:00,order_placed,web,sess-partner-022,desktop,FR,Lyon,sku-1005,Noise-Cancelling Buds,audio,Sonar,179.00,cust-00002,loyal,ord-p00006,2,5,EUR,paypal,newsletter,email,newsletter
+2026-06-24T09:02:49+00:00,product_viewed,mobile_web,sess-partner-006,mobile,ES,Madrid,sku-1004,USB-C Hub 8-in-1,accessories,Portis,59.90,cust-00003,returning,,,,EUR,,spring_sale,google,cpc
+2026-06-24T09:16:21+00:00,product_viewed,web,sess-partner-023,desktop,FR,Marseille,sku-1007,Webcam 1080p,electronics,Lumen,74.90,cust-00006,loyal,,,,EUR,,newsletter,email,newsletter
+2026-06-24T09:17:58+00:00,product_viewed,mobile_app,sess-partner-025,mobile,FR,Marseille,sku-1006,Laptop Stand Alu,accessories,Portis,39.50,cust-00006,loyal,,,,EUR,,spring_sale,google,cpc
+2026-06-24T09:37:05+00:00,product_viewed,mobile_app,sess-partner-009,mobile,GB,London,sku-1010,Portable SSD 1TB,storage,Byteon,119.00,cust-00008,returning,,,,EUR,,spring_sale,google,cpc
+2026-06-24T09:37:33+00:00,add_to_cart,mobile_app,sess-partner-009,mobile,GB,London,sku-1010,Portable SSD 1TB,storage,Byteon,119.00,cust-00008,returning,,3,,EUR,,spring_sale,google,cpc
+2026-06-24T09:40:11+00:00,checkout_started,mobile_app,sess-partner-009,mobile,GB,London,sku-1010,Portable SSD 1TB,storage,Byteon,119.00,cust-00008,returning,,2,,EUR,,spring_sale,google,cpc
+2026-06-24T09:43:00+00:00,order_placed,mobile_app,sess-partner-009,mobile,GB,London,sku-1010,Portable SSD 1TB,storage,Byteon,119.00,cust-00008,returning,ord-p00003,3,0,EUR,wallet,spring_sale,google,cpc
+2026-06-24T10:41:20+00:00,product_viewed,mobile_app,sess-partner-010,mobile,GB,London,sku-1003,"27"" 4K Monitor",electronics,Lumen,349.90,cust-00008,returning,,,,EUR,,newsletter,email,newsletter
+2026-06-24T10:42:00+00:00,add_to_cart,mobile_app,sess-partner-010,mobile,GB,London,sku-1003,"27"" 4K Monitor",electronics,Lumen,349.90,cust-00008,returning,,2,,EUR,,newsletter,email,newsletter
+2026-06-24T10:43:53+00:00,product_viewed,marketplace,sess-partner-013,desktop,DE,Berlin,sku-1008,Ergonomic Chair,furniture,Seatly,449.00,cust-00004,new,,,,EUR,,spring_sale,google,cpc
+2026-06-24T10:45:58+00:00,checkout_started,mobile_app,sess-partner-010,mobile,GB,London,sku-1003,"27"" 4K Monitor",electronics,Lumen,349.90,cust-00008,returning,,2,,EUR,,newsletter,email,newsletter
+2026-06-24T10:48:19+00:00,order_placed,mobile_app,sess-partner-010,mobile,GB,London,sku-1003,"27"" 4K Monitor",electronics,Lumen,349.90,cust-00008,returning,ord-p00004,2,10,EUR,paypal,newsletter,email,newsletter
+2026-06-24T10:56:46+00:00,product_viewed,mobile_app,sess-partner-021,mobile,FR,Lyon,sku-1001,Wireless Mouse,electronics,Acme,49.99,cust-00002,loyal,,,,EUR,,spring_sale,google,cpc
+2026-06-24T10:59:50+00:00,add_to_cart,mobile_app,sess-partner-021,mobile,FR,Lyon,sku-1001,Wireless Mouse,electronics,Acme,49.99,cust-00002,loyal,,2,,EUR,,spring_sale,google,cpc
+2026-06-24T11:02:58+00:00,checkout_started,mobile_app,sess-partner-021,mobile,FR,Lyon,sku-1001,Wireless Mouse,electronics,Acme,49.99,cust-00002,loyal,,2,,EUR,,spring_sale,google,cpc
+2026-06-24T11:28:16+00:00,product_viewed,mobile_app,sess-partner-032,mobile,ES,Madrid,sku-1009,Desk Lamp LED,furniture,Lumen,34.90,cust-00003,returning,,,,EUR,,,direct,none
+2026-06-24T11:30:08+00:00,add_to_cart,mobile_app,sess-partner-032,mobile,ES,Madrid,sku-1009,Desk Lamp LED,furniture,Lumen,34.90,cust-00003,returning,,3,,EUR,,,direct,none
+2026-06-24T11:31:29+00:00,product_viewed,web,sess-partner-001,desktop,ES,Madrid,sku-1002,Mechanical Keyboard,electronics,Acme,129.00,cust-00003,returning,,,,EUR,,,direct,none
+2026-06-24T12:09:37+00:00,product_viewed,web,sess-partner-038,desktop,IT,Milano,sku-1008,Ergonomic Chair,furniture,Seatly,449.00,cust-00005,churn_risk,,,,EUR,,retargeting,meta,paid_social
+2026-06-24T12:13:36+00:00,product_viewed,web,sess-partner-037,desktop,FR,Marseille,sku-1008,Ergonomic Chair,furniture,Seatly,449.00,cust-00006,loyal,,,,EUR,,spring_sale,google,cpc
+2026-06-24T12:40:35+00:00,product_viewed,mobile_app,sess-partner-036,mobile,CH,Zurich,sku-1003,"27"" 4K Monitor",electronics,Lumen,349.90,cust-00007,new,,,,EUR,,,direct,none
+2026-06-24T12:51:25+00:00,product_viewed,mobile_web,sess-partner-008,mobile,IT,Milano,sku-1008,Ergonomic Chair,furniture,Seatly,449.00,cust-00005,churn_risk,,,,EUR,,spring_sale,google,cpc
+2026-06-24T12:52:41+00:00,add_to_cart,mobile_web,sess-partner-008,mobile,IT,Milano,sku-1008,Ergonomic Chair,furniture,Seatly,449.00,cust-00005,churn_risk,,2,,EUR,,spring_sale,google,cpc
+2026-06-24T12:54:07+00:00,checkout_started,mobile_web,sess-partner-008,mobile,IT,Milano,sku-1008,Ergonomic Chair,furniture,Seatly,449.00,cust-00005,churn_risk,,1,,EUR,,spring_sale,google,cpc
+2026-06-24T12:57:14+00:00,order_placed,mobile_web,sess-partner-008,mobile,IT,Milano,sku-1008,Ergonomic Chair,furniture,Seatly,449.00,cust-00005,churn_risk,ord-p00002,2,0,EUR,paypal,spring_sale,google,cpc
+2026-06-24T13:00:02+00:00,product_viewed,mobile_app,sess-partner-026,mobile,DE,Berlin,sku-1003,"27"" 4K Monitor",electronics,Lumen,349.90,cust-00004,new,,,,EUR,,retargeting,meta,paid_social
+2026-06-24T13:09:10+00:00,product_viewed,mobile_app,sess-partner-018,mobile,ES,Madrid,sku-1005,Noise-Cancelling Buds,audio,Sonar,179.00,cust-00003,returning,,,,EUR,,spring_sale,google,cpc
+2026-06-24T13:10:41+00:00,add_to_cart,mobile_app,sess-partner-018,mobile,ES,Madrid,sku-1005,Noise-Cancelling Buds,audio,Sonar,179.00,cust-00003,returning,,1,,EUR,,spring_sale,google,cpc
+2026-06-24T13:11:19+00:00,checkout_started,mobile_app,sess-partner-018,mobile,ES,Madrid,sku-1005,Noise-Cancelling Buds,audio,Sonar,179.00,cust-00003,returning,,3,,EUR,,spring_sale,google,cpc
+2026-06-24T13:55:43+00:00,product_viewed,web,sess-partner-014,desktop,ES,Madrid,sku-1010,Portable SSD 1TB,storage,Byteon,119.00,cust-00003,returning,,,,EUR,,,direct,none
+2026-06-24T14:02:02+00:00,product_viewed,mobile_web,sess-partner-011,mobile,DE,Berlin,sku-1001,Wireless Mouse,electronics,Acme,49.99,cust-00004,new,,,,EUR,,newsletter,email,newsletter
+2026-06-24T14:02:47+00:00,add_to_cart,mobile_web,sess-partner-011,mobile,DE,Berlin,sku-1001,Wireless Mouse,electronics,Acme,49.99,cust-00004,new,,2,,EUR,,newsletter,email,newsletter
+2026-06-24T14:04:08+00:00,product_viewed,web,sess-partner-005,desktop,CH,Zurich,sku-1005,Noise-Cancelling Buds,audio,Sonar,179.00,cust-00007,new,,,,EUR,,retargeting,meta,paid_social
+2026-06-24T14:13:29+00:00,product_viewed,marketplace,sess-partner-019,desktop,FR,Paris,sku-1003,"27"" 4K Monitor",electronics,Lumen,349.90,cust-00001,vip,,,,EUR,,,direct,none
+2026-06-24T14:15:18+00:00,add_to_cart,marketplace,sess-partner-019,desktop,FR,Paris,sku-1003,"27"" 4K Monitor",electronics,Lumen,349.90,cust-00001,vip,,1,,EUR,,,direct,none
+2026-06-24T14:15:40+00:00,product_viewed,web,sess-partner-028,desktop,FR,Lyon,sku-1005,Noise-Cancelling Buds,audio,Sonar,179.00,cust-00002,loyal,,,,EUR,,spring_sale,google,cpc
+2026-06-24T14:18:43+00:00,checkout_started,marketplace,sess-partner-019,desktop,FR,Paris,sku-1003,"27"" 4K Monitor",electronics,Lumen,349.90,cust-00001,vip,,3,,EUR,,,direct,none
+2026-06-24T15:25:45+00:00,product_viewed,web,sess-partner-039,desktop,FR,Paris,sku-1006,Laptop Stand Alu,accessories,Portis,39.50,cust-00001,vip,,,,EUR,,newsletter,email,newsletter
+2026-06-24T15:26:07+00:00,add_to_cart,web,sess-partner-039,desktop,FR,Paris,sku-1006,Laptop Stand Alu,accessories,Portis,39.50,cust-00001,vip,,2,,EUR,,newsletter,email,newsletter
+2026-06-24T15:33:55+00:00,product_viewed,mobile_web,sess-partner-012,mobile,DE,Berlin,sku-1008,Ergonomic Chair,furniture,Seatly,449.00,cust-00004,new,,,,EUR,,newsletter,email,newsletter
+2026-06-24T15:36:11+00:00,add_to_cart,mobile_web,sess-partner-012,mobile,DE,Berlin,sku-1008,Ergonomic Chair,furniture,Seatly,449.00,cust-00004,new,,3,,EUR,,newsletter,email,newsletter
+2026-06-24T15:40:07+00:00,checkout_started,mobile_web,sess-partner-012,mobile,DE,Berlin,sku-1008,Ergonomic Chair,furniture,Seatly,449.00,cust-00004,new,,2,,EUR,,newsletter,email,newsletter
+2026-06-24T15:49:19+00:00,product_viewed,web,sess-partner-031,desktop,IT,Milano,sku-1002,Mechanical Keyboard,electronics,Acme,129.00,cust-00005,churn_risk,,,,EUR,,spring_sale,google,cpc
+2026-06-24T15:51:24+00:00,add_to_cart,web,sess-partner-031,desktop,IT,Milano,sku-1002,Mechanical Keyboard,electronics,Acme,129.00,cust-00005,churn_risk,,2,,EUR,,spring_sale,google,cpc
+2026-06-24T15:52:09+00:00,checkout_started,web,sess-partner-031,desktop,IT,Milano,sku-1002,Mechanical Keyboard,electronics,Acme,129.00,cust-00005,churn_risk,,1,,EUR,,spring_sale,google,cpc
+2026-06-24T16:10:41+00:00,product_viewed,mobile_web,sess-partner-030,mobile,IT,Milano,sku-1007,Webcam 1080p,electronics,Lumen,74.90,cust-00005,churn_risk,,,,EUR,,spring_sale,google,cpc
+2026-06-24T16:14:21+00:00,add_to_cart,mobile_web,sess-partner-030,mobile,IT,Milano,sku-1007,Webcam 1080p,electronics,Lumen,74.90,cust-00005,churn_risk,,1,,EUR,,spring_sale,google,cpc
+2026-06-24T16:41:55+00:00,product_viewed,mobile_app,sess-partner-033,mobile,DE,Berlin,sku-1009,Desk Lamp LED,furniture,Lumen,34.90,cust-00004,new,,,,EUR,,spring_sale,google,cpc
+2026-06-24T16:55:38+00:00,product_viewed,mobile_app,sess-partner-007,mobile,FR,Paris,sku-1010,Portable SSD 1TB,storage,Byteon,119.00,cust-00001,vip,,,,EUR,,spring_sale,google,cpc
+2026-06-24T16:57:21+00:00,add_to_cart,mobile_app,sess-partner-007,mobile,FR,Paris,sku-1010,Portable SSD 1TB,storage,Byteon,119.00,cust-00001,vip,,3,,EUR,,spring_sale,google,cpc
+2026-06-24T16:59:44+00:00,product_viewed,mobile_app,sess-partner-015,mobile,FR,Marseille,sku-1002,Mechanical Keyboard,electronics,Acme,129.00,cust-00006,loyal,,,,EUR,,,direct,none
+2026-06-24T17:00:43+00:00,product_viewed,web,sess-partner-004,desktop,DE,Berlin,sku-1001,Wireless Mouse,electronics,Acme,49.99,cust-00004,new,,,,EUR,,retargeting,meta,paid_social
+2026-06-24T17:03:24+00:00,add_to_cart,mobile_app,sess-partner-015,mobile,FR,Marseille,sku-1002,Mechanical Keyboard,electronics,Acme,129.00,cust-00006,loyal,,1,,EUR,,,direct,none
+2026-06-24T17:04:02+00:00,add_to_cart,web,sess-partner-004,desktop,DE,Berlin,sku-1001,Wireless Mouse,electronics,Acme,49.99,cust-00004,new,,1,,EUR,,retargeting,meta,paid_social
+2026-06-24T17:06:17+00:00,checkout_started,mobile_app,sess-partner-015,mobile,FR,Marseille,sku-1002,Mechanical Keyboard,electronics,Acme,129.00,cust-00006,loyal,,1,,EUR,,,direct,none
+2026-06-24T17:08:49+00:00,order_placed,mobile_app,sess-partner-015,mobile,FR,Marseille,sku-1002,Mechanical Keyboard,electronics,Acme,129.00,cust-00006,loyal,ord-p00005,3,5,EUR,paypal,,direct,none
+2026-06-24T17:11:53+00:00,product_viewed,mobile_app,sess-partner-034,mobile,FR,Paris,sku-1009,Desk Lamp LED,furniture,Lumen,34.90,cust-00001,vip,,,,EUR,,,direct,none
+2026-06-24T17:15:38+00:00,add_to_cart,mobile_app,sess-partner-034,mobile,FR,Paris,sku-1009,Desk Lamp LED,furniture,Lumen,34.90,cust-00001,vip,,2,,EUR,,,direct,none
+2026-06-24T17:18:09+00:00,checkout_started,mobile_app,sess-partner-034,mobile,FR,Paris,sku-1009,Desk Lamp LED,furniture,Lumen,34.90,cust-00001,vip,,3,,EUR,,,direct,none
+2026-06-24T17:24:13+00:00,product_viewed,marketplace,sess-partner-017,desktop,GB,London,sku-1004,USB-C Hub 8-in-1,accessories,Portis,59.90,cust-00008,returning,,,,EUR,,newsletter,email,newsletter
+2026-06-24T17:27:41+00:00,add_to_cart,marketplace,sess-partner-017,desktop,GB,London,sku-1004,USB-C Hub 8-in-1,accessories,Portis,59.90,cust-00008,returning,,3,,EUR,,newsletter,email,newsletter
+2026-06-24T17:46:01+00:00,product_viewed,mobile_web,sess-partner-003,mobile,FR,Lyon,sku-1002,Mechanical Keyboard,electronics,Acme,129.00,cust-00002,loyal,,,,EUR,,spring_sale,google,cpc
+2026-06-24T17:46:21+00:00,product_viewed,mobile_web,sess-partner-020,mobile,ES,Madrid,sku-1007,Webcam 1080p,electronics,Lumen,74.90,cust-00003,returning,,,,EUR,,newsletter,email,newsletter
+2026-06-24T17:46:43+00:00,add_to_cart,mobile_web,sess-partner-003,mobile,FR,Lyon,sku-1002,Mechanical Keyboard,electronics,Acme,129.00,cust-00002,loyal,,3,,EUR,,spring_sale,google,cpc
+2026-06-24T17:47:32+00:00,add_to_cart,mobile_web,sess-partner-020,mobile,ES,Madrid,sku-1007,Webcam 1080p,electronics,Lumen,74.90,cust-00003,returning,,1,,EUR,,newsletter,email,newsletter
+2026-06-24T17:51:32+00:00,checkout_started,mobile_web,sess-partner-020,mobile,ES,Madrid,sku-1007,Webcam 1080p,electronics,Lumen,74.90,cust-00003,returning,,1,,EUR,,newsletter,email,newsletter
+2026-06-24T17:54:19+00:00,product_viewed,mobile_web,sess-partner-029,mobile,FR,Marseille,sku-1003,"27"" 4K Monitor",electronics,Lumen,349.90,cust-00006,loyal,,,,EUR,,spring_sale,google,cpc
+2026-06-24T17:55:37+00:00,add_to_cart,mobile_web,sess-partner-029,mobile,FR,Marseille,sku-1003,"27"" 4K Monitor",electronics,Lumen,349.90,cust-00006,loyal,,2,,EUR,,spring_sale,google,cpc
+2026-06-24T17:56:48+00:00,checkout_started,mobile_web,sess-partner-029,mobile,FR,Marseille,sku-1003,"27"" 4K Monitor",electronics,Lumen,349.90,cust-00006,loyal,,2,,EUR,,spring_sale,google,cpc
+2026-06-24T18:24:05+00:00,product_viewed,web,sess-partner-024,desktop,FR,Marseille,sku-1008,Ergonomic Chair,furniture,Seatly,449.00,cust-00006,loyal,,,,EUR,,spring_sale,google,cpc
+2026-06-24T18:25:47+00:00,product_viewed,mobile_web,sess-partner-016,mobile,FR,Marseille,sku-1006,Laptop Stand Alu,accessories,Portis,39.50,cust-00006,loyal,,,,EUR,,retargeting,meta,paid_social
+2026-06-24T18:26:12+00:00,add_to_cart,web,sess-partner-024,desktop,FR,Marseille,sku-1008,Ergonomic Chair,furniture,Seatly,449.00,cust-00006,loyal,,1,,EUR,,spring_sale,google,cpc
+2026-06-24T18:28:50+00:00,checkout_started,web,sess-partner-024,desktop,FR,Marseille,sku-1008,Ergonomic Chair,furniture,Seatly,449.00,cust-00006,loyal,,2,,EUR,,spring_sale,google,cpc
+2026-06-24T18:29:47+00:00,add_to_cart,mobile_web,sess-partner-016,mobile,FR,Marseille,sku-1006,Laptop Stand Alu,accessories,Portis,39.50,cust-00006,loyal,,1,,EUR,,retargeting,meta,paid_social
+2026-06-24T18:30:27+00:00,order_placed,web,sess-partner-024,desktop,FR,Marseille,sku-1008,Ergonomic Chair,furniture,Seatly,449.00,cust-00006,loyal,ord-p00007,1,0,EUR,card,spring_sale,google,cpc
+2026-06-24T18:32:54+00:00,checkout_started,mobile_web,sess-partner-016,mobile,FR,Marseille,sku-1006,Laptop Stand Alu,accessories,Portis,39.50,cust-00006,loyal,,3,,EUR,,retargeting,meta,paid_social
+2026-06-24T18:50:41+00:00,product_viewed,mobile_app,sess-partner-002,mobile,CH,Zurich,sku-1002,Mechanical Keyboard,electronics,Acme,129.00,cust-00007,new,,,,EUR,,spring_sale,google,cpc
+2026-06-24T18:53:40+00:00,add_to_cart,mobile_app,sess-partner-002,mobile,CH,Zurich,sku-1002,Mechanical Keyboard,electronics,Acme,129.00,cust-00007,new,,2,,EUR,,spring_sale,google,cpc

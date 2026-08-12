@@ -1,0 +1,9 @@
+customer_id,segment,country,city
+cust-00001,vip,FR,Paris
+cust-00002,loyal,FR,Lyon
+cust-00003,returning,ES,Madrid
+cust-00004,new,DE,Berlin
+cust-00005,churn_risk,IT,Milano
+cust-00006,loyal,FR,Marseille
+cust-00007,new,CH,Zurich
+cust-00008,returning,GB,London
