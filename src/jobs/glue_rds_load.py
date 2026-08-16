@@ -37,6 +37,9 @@ from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
 import boto3
+
+from common import lakehouse
+from common.metrics import MetricsEmitter
 try:
     from pyspark.sql import SparkSession
 except Exception:  # pragma: no cover - environment may not have pyspark installed
@@ -54,254 +57,6 @@ logging.basicConfig(
     format="%(asctime)s - %(levelname)s - %(message)s",
 )
 logger = logging.getLogger(__name__)
-
-
-# ─────────────────────────────────────────────
-# LAKE LAYOUT
-# ─────────────────────────────────────────────
-# A copy of common/lakehouse.py, on purpose: this script is standalone, and
-# common/ belongs to the Lambdas. tests/test_job_self_containment.py pins every
-# copy against the original, so a divergence fails the build rather than
-# silently writing a day of data into the wrong prefix.
-
-#: The medallion zones, in flow order.
-ZONES: tuple = ("landing", "bronze", "silver", "gold", "quarantine", "quality")
-
-#: Default prefix of each zone inside ``OUTPUT_BUCKET``.
-DEFAULT_ZONE_PREFIXES: dict = {
-    "landing": "landing/",
-    "bronze": "bronze/",
-    "silver": "silver/",
-    "gold": "gold/",
-    "quarantine": "quarantine/",
-    "quality": "quality/",
-}
-
-#: Pre-medallion config key that still defines a whole zone.
-LEGACY_ZONE_KEYS: dict = {
-    "gold": "CURATED_PREFIX",
-}
-
-#: Pre-medallion config keys that define a single dataset:
-#: ``dataset -> (prefix key, full-path key)``.
-LEGACY_DATASET_KEYS: dict = {
-    "bronze/events": ("RAW_PREFIX", "RAW_S3_PATH"),
-    "silver/events": ("PROCESSED_PREFIX", "PROCESSED_S3_PATH"),
-    "quarantine/events": ("REJECTED_PREFIX", None),
-}
-
-#: Gold datasets and the columns they are partitioned by (``None`` = unpartitioned).
-GOLD_DATASETS: dict = {
-    "sessions": ["partition_date"],
-    "funnel_daily": ["partition_date"],
-    "orders": ["partition_date"],
-    "customer_rfm": None,
-    "product_daily": ["partition_date"],
-    "anomalies": ["partition_date"],
-}
-
-
-# -------------------------------------------------
-# PREFIXES
-# -------------------------------------------------
-
-def _norm(prefix: str) -> str:
-    """``"/gold"`` -> ``"gold/"``; the empty prefix stays empty (bucket root)."""
-    prefix = str(prefix).strip().strip("/")
-    return f"{prefix}/" if prefix else ""
-
-
-def zone_prefix(config: dict, zone: str) -> str:
-    """Prefix of a zone: ``<ZONE>_PREFIX``, then its legacy key, then the default."""
-    if zone not in DEFAULT_ZONE_PREFIXES:
-        raise ValueError(f"Unknown zone '{zone}' (expected one of {list(ZONES)})")
-
-    for key in (f"{zone.upper()}_PREFIX", LEGACY_ZONE_KEYS.get(zone)):
-        if key and config.get(key) is not None:
-            return _norm(config[key])
-    return DEFAULT_ZONE_PREFIXES[zone]
-
-
-def _split(dataset: str) -> Tuple[str, str]:
-    zone, _, name = dataset.partition("/")
-    return zone, name.strip("/")
-
-
-def dataset_prefix(config: dict, dataset: str) -> str:
-    """Prefix of a dataset such as ``bronze/events`` or ``gold/orders``.
-
-    Precedence: the derived key (``BRONZE_EVENTS_PREFIX``), then the legacy key
-    (``RAW_PREFIX``), then ``<zone prefix>/<name>/``.
-    """
-    zone, name = _split(dataset)
-    if not name:
-        return zone_prefix(config, zone)
-
-    derived = f"{zone.upper()}_{name.upper().replace('/', '_')}_PREFIX"
-    legacy = (LEGACY_DATASET_KEYS.get(f"{zone}/{name}") or (None, None))[0]
-    for key in (derived, legacy):
-        if key and config.get(key) is not None:
-            return _norm(config[key])
-
-    return f"{zone_prefix(config, zone)}{name}/"
-
-
-# -------------------------------------------------
-# PATHS
-# -------------------------------------------------
-
-def s3_path(bucket: str, prefix: str) -> str:
-    return f"s3://{bucket}/{_norm(prefix)}"
-
-
-def zone_path(config: dict, zone: str) -> str:
-    return s3_path(config["OUTPUT_BUCKET"], zone_prefix(config, zone))
-
-
-def dataset_path(config: dict, dataset: str) -> str:
-    """Full ``s3://`` path of a dataset, honouring any full-path override.
-
-    ``dataset`` may itself be an ``s3://`` URI, which is returned as-is — that
-    is what lets a config point one target at another bucket entirely.
-    """
-    if dataset.startswith("s3://"):
-        return dataset if dataset.endswith("/") else dataset + "/"
-
-    zone, name = _split(dataset)
-    derived = (
-        f"{zone.upper()}_{name.upper().replace('/', '_')}_S3_PATH" if name
-        else f"{zone.upper()}_S3_PATH"
-    )
-    legacy = (LEGACY_DATASET_KEYS.get(dataset) or (None, None))[1]
-    for key in (derived, legacy):
-        if key and config.get(key):
-            value = str(config[key])
-            return value if value.endswith("/") else value + "/"
-
-    return s3_path(config["OUTPUT_BUCKET"], dataset_prefix(config, dataset))
-
-
-def gold_path(config: dict, name: str) -> str:
-    return dataset_path(config, f"gold/{name}")
-
-
-def build_paths(config: dict) -> dict:
-    """Every path a job might need, resolved once.
-
-    Legacy aliases (``raw``/``processed``/``curated``/``rejected``) are kept so
-    older call sites keep reading the same keys.
-    """
-    bucket = config["OUTPUT_BUCKET"]
-    paths = {"bucket": bucket}
-    paths.update({zone: zone_path(config, zone) for zone in ZONES})
-    paths.update({
-        "bronze_events": dataset_path(config, "bronze/events"),
-        "silver_events": dataset_path(config, "silver/events"),
-        "quarantine_events": dataset_path(config, "quarantine/events"),
-    })
-    paths.update({
-        "raw": paths["bronze_events"],
-        "processed": paths["silver_events"],
-        "curated": paths["gold"],
-        "rejected": paths["quarantine_events"],
-    })
-    return paths
-
-
-def resolve_gold_datasets(config: dict) -> List[str]:
-    """Which gold tables to build. An explicit empty list means *none*.
-
-    ``None``/absent means "all of them" — an empty list has to mean something
-    different, otherwise the silver job could never hand the gold layer over to
-    the gold job.
-    """
-    requested = config.get("GOLD_DATASETS", config.get("CURATED_DATASETS"))
-    if requested is None:
-        return list(GOLD_DATASETS)
-
-    unknown = [name for name in requested if name not in GOLD_DATASETS]
-    if unknown:
-        raise ValueError(f"Unknown gold dataset(s): {unknown}")
-    return list(requested)
-
-
-# ─────────────────────────────────────────────
-# METRICS
-# ─────────────────────────────────────────────
-
-class JobMetrics:
-    """CloudWatch counters for this job.
-
-    Never raises and never requires AWS: an observability failure must not fail
-    a data run, and ``METRICS_ENABLED: false`` silences it entirely.
-    """
-
-    MAX_ITEMS_PER_CALL = 20
-
-    def __init__(self, namespace: str, dimensions: dict, enabled: bool, client=None) -> None:
-        self.namespace = namespace
-        self.dimensions = {k: str(v) for k, v in (dimensions or {}).items() if v is not None}
-        self.enabled = bool(enabled and namespace)
-        self._client = client
-        self._buffer: list = []
-
-    @classmethod
-    def from_config(cls, config: dict, stage: str, client=None) -> "JobMetrics":
-        config = config or {}
-        dimensions = {"Stage": stage, **(config.get("METRICS_DIMENSIONS") or {})}
-        if config.get("ENVIRONMENT"):
-            dimensions.setdefault("Environment", config["ENVIRONMENT"])
-
-        # The env var is the operator's kill switch — it silences metrics in a
-        # sandbox without editing every config file.
-        env_default = os.environ.get("METRICS_ENABLED", "true").strip().lower() not in ("false", "0", "no")
-
-        return cls(
-            namespace=config.get("METRICS_NAMESPACE", "Ecommerce/Pipeline"),
-            dimensions=dimensions,
-            enabled=config.get("METRICS_ENABLED", env_default),
-            client=client,
-        )
-
-    def _put(self, name: str, value: float, unit: str, dimensions: dict) -> None:
-        if not self.enabled:
-            return
-        merged = {**self.dimensions, **{k: str(v) for k, v in (dimensions or {}).items() if v is not None}}
-        self._buffer.append({
-            "MetricName": name,
-            "Value": float(value),
-            "Unit": unit,
-            "Dimensions": [{"Name": k, "Value": v} for k, v in merged.items()],
-        })
-
-    def count(self, name: str, value: float = 1, **dimensions: str) -> None:
-        self._put(name, value, "Count", dimensions)
-
-    def gauge(self, name: str, value: float, unit: str = "None", **dimensions: str) -> None:
-        self._put(name, value, unit, dimensions)
-
-    def flush(self) -> int:
-        """Ship the buffer. Returns how many metrics were accepted."""
-        if not self.enabled or not self._buffer:
-            self._buffer.clear()
-            return 0
-
-        pending, self._buffer = self._buffer, []
-        try:
-            client = self._client or boto3.client("cloudwatch")
-        except Exception as exc:  # noqa: BLE001 - observability must not break the run
-            logger.warning("CloudWatch unavailable, dropping %d metrics: %s", len(pending), exc)
-            return 0
-
-        sent = 0
-        for offset in range(0, len(pending), self.MAX_ITEMS_PER_CALL):
-            chunk = pending[offset:offset + self.MAX_ITEMS_PER_CALL]
-            try:
-                client.put_metric_data(Namespace=self.namespace, MetricData=chunk)
-                sent += len(chunk)
-            except Exception as exc:  # noqa: BLE001
-                logger.warning("put_metric_data failed for %d metrics: %s", len(chunk), exc)
-        return sent
 
 
 #: Secret keys accepted for each setting, in order of preference. RDS rotates
@@ -375,7 +130,7 @@ def _load_secret(secret_arn: str) -> dict:
 
 def _build_processed_path(config: dict) -> str:
     """The event fact table — ``silver/events``, or wherever the config puts it."""
-    return dataset_path(config, "silver/events")
+    return lakehouse.dataset_path(config, "silver/events")
 
 
 def _dataset_path(config: dict, dataset: str) -> str:
@@ -390,11 +145,11 @@ def _dataset_path(config: dict, dataset: str) -> str:
     if dataset in ("processed", "silver"):
         return _build_processed_path(config)
     if dataset.startswith("curated/"):
-        return gold_path(config, dataset.split("/", 1)[1])
-    if dataset.split("/", 1)[0] in ZONES:
-        return dataset_path(config, dataset)
+        return lakehouse.gold_path(config, dataset.split("/", 1)[1])
+    if dataset.split("/", 1)[0] in lakehouse.ZONES:
+        return lakehouse.dataset_path(config, dataset)
 
-    return s3_path(config["OUTPUT_BUCKET"], dataset)
+    return lakehouse.s3_path(config["OUTPUT_BUCKET"], dataset)
 
 
 def resolve_targets(config: dict) -> List[Dict[str, Any]]:
@@ -606,7 +361,7 @@ def main() -> None:
     total_rows = sum(item["rows_loaded"] for item in results)
 
     try:
-        metrics = JobMetrics.from_config(config, stage="glue_rds_load")
+        metrics = MetricsEmitter.from_config(config, stage="glue_rds_load")
         metrics.count("RowsLoaded", total_rows)
         metrics.count("TablesLoaded", sum(1 for item in results if item["status"] == "loaded"))
         metrics.count("TablesSkipped", sum(1 for item in results if item["status"] == "skipped"))

@@ -37,12 +37,14 @@ from __future__ import annotations
 
 import json
 import logging
-import os
 import sys
 from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional, Tuple
 
 import boto3
+
+from common import lakehouse
+from common.metrics import MetricsEmitter
 
 try:
     from awsglue.utils import getResolvedOptions
@@ -57,7 +59,7 @@ logger = logging.getLogger(__name__)
 # ─────────────────────────────────────────────
 # Guarded: this module is imported by the unit tests on machines with no
 # PySpark. Every Spark object below is built inside a function.
-try:  # pragma: no cover - exercised implicitly by every Spark test
+try:  # pragma: no cover - Spark is absent in the unit tests
     from pyspark.sql import DataFrame, SparkSession
     from pyspark.sql import functions as F
     from pyspark.sql.types import (
@@ -68,236 +70,15 @@ try:  # pragma: no cover - exercised implicitly by every Spark test
         StructField,
         StructType,
     )
+    from pyspark.sql.window import Window
 except Exception:  # pragma: no cover
-    DataFrame = SparkSession = F = None
+    DataFrame = SparkSession = F = Window = None
     BooleanType = DoubleType = IntegerType = StringType = StructField = StructType = None
-
-
-# ─────────────────────────────────────────────
-# LAKE LAYOUT
-# ─────────────────────────────────────────────
-# A copy of common/lakehouse.py, on purpose: this script is standalone, and
-# common/ belongs to the Lambdas. tests/test_job_self_containment.py pins every
-# copy against the original.
-
-#: The medallion zones, in flow order.
-ZONES: tuple = ("landing", "bronze", "silver", "gold", "quarantine", "quality")
-
-#: Default prefix of each zone inside ``OUTPUT_BUCKET``.
-DEFAULT_ZONE_PREFIXES: dict = {
-    "landing": "landing/",
-    "bronze": "bronze/",
-    "silver": "silver/",
-    "gold": "gold/",
-    "quarantine": "quarantine/",
-    "quality": "quality/",
-}
-
-#: Pre-medallion config key that still defines a whole zone.
-LEGACY_ZONE_KEYS: dict = {
-    "gold": "CURATED_PREFIX",
-}
-
-#: Pre-medallion config keys that define a single dataset:
-#: ``dataset -> (prefix key, full-path key)``.
-LEGACY_DATASET_KEYS: dict = {
-    "bronze/events": ("RAW_PREFIX", "RAW_S3_PATH"),
-    "silver/events": ("PROCESSED_PREFIX", "PROCESSED_S3_PATH"),
-    "quarantine/events": ("REJECTED_PREFIX", None),
-}
-
-#: Gold datasets and the columns they are partitioned by (``None`` = unpartitioned).
-GOLD_DATASETS: dict = {
-    "sessions": ["partition_date"],
-    "funnel_daily": ["partition_date"],
-    "orders": ["partition_date"],
-    "customer_rfm": None,
-    "product_daily": ["partition_date"],
-    "anomalies": ["partition_date"],
-}
-
-
-def _norm(prefix: str) -> str:
-    """``"/gold"`` -> ``"gold/"``; the empty prefix stays empty (bucket root)."""
-    prefix = str(prefix).strip().strip("/")
-    return f"{prefix}/" if prefix else ""
-
-
-def zone_prefix(config: dict, zone: str) -> str:
-    """Prefix of a zone: ``<ZONE>_PREFIX``, then its legacy key, then the default."""
-    if zone not in DEFAULT_ZONE_PREFIXES:
-        raise ValueError(f"Unknown zone '{zone}' (expected one of {list(ZONES)})")
-
-    for key in (f"{zone.upper()}_PREFIX", LEGACY_ZONE_KEYS.get(zone)):
-        if key and config.get(key) is not None:
-            return _norm(config[key])
-    return DEFAULT_ZONE_PREFIXES[zone]
-
-
-def _split(dataset: str) -> Tuple[str, str]:
-    zone, _, name = dataset.partition("/")
-    return zone, name.strip("/")
-
-
-def dataset_prefix(config: dict, dataset: str) -> str:
-    """Prefix of a dataset such as ``bronze/events`` or ``gold/orders``."""
-    zone, name = _split(dataset)
-    if not name:
-        return zone_prefix(config, zone)
-
-    derived = f"{zone.upper()}_{name.upper().replace('/', '_')}_PREFIX"
-    legacy = (LEGACY_DATASET_KEYS.get(f"{zone}/{name}") or (None, None))[0]
-    for key in (derived, legacy):
-        if key and config.get(key) is not None:
-            return _norm(config[key])
-
-    return f"{zone_prefix(config, zone)}{name}/"
-
-
-def s3_path(bucket: str, prefix: str) -> str:
-    return f"s3://{bucket}/{_norm(prefix)}"
-
-
-def zone_path(config: dict, zone: str) -> str:
-    return s3_path(config["OUTPUT_BUCKET"], zone_prefix(config, zone))
-
-
-def dataset_path(config: dict, dataset: str) -> str:
-    """Full ``s3://`` path of a dataset, honouring any full-path override."""
-    if dataset.startswith("s3://"):
-        return dataset if dataset.endswith("/") else dataset + "/"
-
-    zone, name = _split(dataset)
-    derived = (
-        f"{zone.upper()}_{name.upper().replace('/', '_')}_S3_PATH" if name
-        else f"{zone.upper()}_S3_PATH"
-    )
-    legacy = (LEGACY_DATASET_KEYS.get(dataset) or (None, None))[1]
-    for key in (derived, legacy):
-        if key and config.get(key):
-            value = str(config[key])
-            return value if value.endswith("/") else value + "/"
-
-    return s3_path(config["OUTPUT_BUCKET"], dataset_prefix(config, dataset))
-
-
-def gold_path(config: dict, name: str) -> str:
-    return dataset_path(config, f"gold/{name}")
-
-
-def build_paths(config: dict) -> dict:
-    """Every path a job might need, resolved once."""
-    bucket = config["OUTPUT_BUCKET"]
-    paths = {"bucket": bucket}
-    paths.update({zone: zone_path(config, zone) for zone in ZONES})
-    paths.update({
-        "bronze_events": dataset_path(config, "bronze/events"),
-        "silver_events": dataset_path(config, "silver/events"),
-        "quarantine_events": dataset_path(config, "quarantine/events"),
-    })
-    paths.update({
-        "raw": paths["bronze_events"],
-        "processed": paths["silver_events"],
-        "curated": paths["gold"],
-        "rejected": paths["quarantine_events"],
-    })
-    return paths
-
-
-def resolve_gold_datasets(config: dict) -> List[str]:
-    """Which gold tables to build. An explicit empty list means *none*."""
-    requested = config.get("GOLD_DATASETS", config.get("CURATED_DATASETS"))
-    if requested is None:
-        return list(GOLD_DATASETS)
-
-    unknown = [name for name in requested if name not in GOLD_DATASETS]
-    if unknown:
-        raise ValueError(f"Unknown gold dataset(s): {unknown}")
-    return list(requested)
-
-
-# ─────────────────────────────────────────────
-# METRICS
-# ─────────────────────────────────────────────
-
-class JobMetrics:
-    """CloudWatch counters for this job.
-
-    Never raises and never requires AWS: an observability failure must not fail
-    a data run, and ``METRICS_ENABLED: false`` silences it entirely.
-    """
-
-    MAX_ITEMS_PER_CALL = 20
-
-    def __init__(self, namespace: str, dimensions: dict, enabled: bool, client=None) -> None:
-        self.namespace = namespace
-        self.dimensions = {k: str(v) for k, v in (dimensions or {}).items() if v is not None}
-        self.enabled = bool(enabled and namespace)
-        self._client = client
-        self._buffer: list = []
-
-    @classmethod
-    def from_config(cls, config: dict, stage: str, client=None) -> "JobMetrics":
-        config = config or {}
-        dimensions = {"Stage": stage, **(config.get("METRICS_DIMENSIONS") or {})}
-        if config.get("ENVIRONMENT"):
-            dimensions.setdefault("Environment", config["ENVIRONMENT"])
-
-        env_default = os.environ.get("METRICS_ENABLED", "true").strip().lower() not in ("false", "0", "no")
-
-        return cls(
-            namespace=config.get("METRICS_NAMESPACE", "Ecommerce/Pipeline"),
-            dimensions=dimensions,
-            enabled=config.get("METRICS_ENABLED", env_default),
-            client=client,
-        )
-
-    def _put(self, name: str, value: float, unit: str, dimensions: dict) -> None:
-        if not self.enabled:
-            return
-        merged = {**self.dimensions, **{k: str(v) for k, v in (dimensions or {}).items() if v is not None}}
-        self._buffer.append({
-            "MetricName": name,
-            "Value": float(value),
-            "Unit": unit,
-            "Dimensions": [{"Name": k, "Value": v} for k, v in merged.items()],
-        })
-
-    def count(self, name: str, value: float = 1, **dimensions: str) -> None:
-        self._put(name, value, "Count", dimensions)
-
-    def gauge(self, name: str, value: float, unit: str = "None", **dimensions: str) -> None:
-        self._put(name, value, unit, dimensions)
-
-    def flush(self) -> int:
-        """Ship the buffer. Returns how many metrics were accepted."""
-        if not self.enabled or not self._buffer:
-            self._buffer.clear()
-            return 0
-
-        pending, self._buffer = self._buffer, []
-        try:
-            client = self._client or boto3.client("cloudwatch")
-        except Exception as exc:  # noqa: BLE001 - observability must not break the run
-            logger.warning("CloudWatch unavailable, dropping %d metrics: %s", len(pending), exc)
-            return 0
-
-        sent = 0
-        for offset in range(0, len(pending), self.MAX_ITEMS_PER_CALL):
-            chunk = pending[offset:offset + self.MAX_ITEMS_PER_CALL]
-            try:
-                client.put_metric_data(Namespace=self.namespace, MetricData=chunk)
-                sent += len(chunk)
-            except Exception as exc:  # noqa: BLE001
-                logger.warning("put_metric_data failed for %d metrics: %s", len(chunk), exc)
-        return sent
 
 
 # ─────────────────────────────────────────────
 # THE v3 RECORD
 # ─────────────────────────────────────────────
-
-SCHEMA_VERSION = "3.0"
 
 #: Where in the drop zone this job looks, relative to the landing zone.
 DEFAULT_INGEST_SUBPATH = "partners/"
@@ -363,93 +144,50 @@ BRONZE_CHECKS: List[Dict[str, str]] = [
 ]
 
 
-def v3_schema() -> "StructType":
-    """The v3 record, as Spark sees it.
+# This script is standalone — what a Glue job's Script path points at is all it runs.
 
-    Built on call rather than at import: this module must import in the unit
-    tests, which do not load PySpark.
+SCHEMA_VERSION = "3.0"
+
+def flat_columns() -> List[str]:
+    """Every flat column name the lift knows how to read."""
+    names = []
+    for aliases in list(PRODUCT_ALIASES.values()) + list(EVENT_ALIASES.values()):
+        names.extend(aliases)
+    return sorted(set(names))
+
+
+def v3_schema(spark: "SparkSession") -> "StructType":
+    """The v3 record shape — *derived* from the lift rather than restated.
+
+    ``lift_flat`` already spells out every field and every type; declaring the
+    same structure a second time as a literal would be two definitions of one
+    contract, and the second one would rot. Lifting an empty frame that has all
+    the columns the lift knows about yields exactly the schema the exporter is
+    expected to produce, so the JSON drops are read with it.
     """
-    return StructType([
-        StructField("schema_version", StringType()),
-        StructField("event_id", StringType()),
-        StructField("idempotency_key", StringType()),
-        StructField("ingested_at", StringType()),
-        StructField("occurred_at", StringType()),
-        StructField("channel", StringType()),
-        StructField("event_type", StringType()),
-        StructField("session", StructType([
-            StructField("session_id", StringType()),
-            StructField("sequence", IntegerType()),
-        ])),
-        StructField("device", StructType([
-            StructField("type", StringType()),
-            StructField("os", StringType()),
-            StructField("user_agent", StringType()),
-        ])),
-        StructField("geo", StructType([
-            StructField("country", StringType()),
-            StructField("city", StringType()),
-        ])),
-        StructField("product", StructType([
-            StructField("product_id", StringType()),
-            StructField("sku", StringType()),
-            StructField("name", StringType()),
-            StructField("category", StringType()),
-            StructField("brand", StringType()),
-            StructField("price", DoubleType()),
-        ])),
-        StructField("customer", StructType([
-            StructField("customer_id", StringType()),
-            StructField("segment", StringType()),
-            StructField("country", StringType()),
-            StructField("is_returning", BooleanType()),
-        ])),
-        StructField("order", StructType([
-            StructField("order_id", StringType()),
-            StructField("quantity", IntegerType()),
-            StructField("unit_price", DoubleType()),
-            StructField("discount_pct", DoubleType()),
-            StructField("gross_amount", DoubleType()),
-            StructField("discount_amount", DoubleType()),
-            StructField("net_amount", DoubleType()),
-            StructField("amount", DoubleType()),
-            StructField("currency", StringType()),
-            StructField("payment_method", StringType()),
-        ])),
-        StructField("marketing", StructType([
-            StructField("campaign", StringType()),
-            StructField("source", StringType()),
-            StructField("medium", StringType()),
-        ])),
-        StructField("_meta", StructType([
-            StructField("processed_at", StringType()),
-            StructField("source", StringType()),
-            StructField("message_id", StringType()),
-            StructField("source_object", StringType()),
-        ])),
-    ])
+    empty = spark.createDataFrame([], ", ".join(f"`{name}` string" for name in flat_columns()))
+    return lift_flat(empty).schema
+
+
+#: Timestamps we accept. Anything else becomes NULL rather than an exception.
+ISO_TIMESTAMP_RE = r"^\d{4}-\d{2}-\d{2}[T ]\d{2}:\d{2}"
+
+
+def load_config(path: str, s3: Any = None) -> dict:
+    """Read a job's JSON config, from S3 or from disk."""
+    LOGGER.info("Loading config from %s", path)
+    if path.startswith("s3://"):
+        bucket, _, key = path[len("s3://"):].partition("/")
+        s3 = s3 or boto3.client("s3")
+        return json.loads(s3.get_object(Bucket=bucket, Key=key)["Body"].read().decode("utf-8"))
+
+    with open(path, "r", encoding="utf-8") as handle:
+        return json.load(handle)
 
 
 # ─────────────────────────────────────────────
 # LIFTING A FLAT ROW
 # ─────────────────────────────────────────────
-
-#: Timestamps we accept. Anything else becomes NULL and is turned away by the
-#: checks — never an exception.
-_ISO_TIMESTAMP_RE = r"^\d{4}-\d{2}-\d{2}[T ]\d{2}:\d{2}"
-
-
-def parse_timestamp(column):
-    """Parse an ISO-8601 string, yielding NULL on garbage.
-
-    Spark runs ANSI mode by default from 4.0, where a bare ``to_timestamp`` on a
-    malformed string *raises* — one unparseable date in a partner export would
-    abort the whole job instead of quarantining one row. Screening with a regex
-    first keeps the NULL-on-bad-input behaviour on every Spark version.
-    """
-    normalized = F.regexp_replace(column, "Z$", "+00:00")
-    return F.to_timestamp(F.when(normalized.rlike(_ISO_TIMESTAMP_RE), normalized))
-
 
 def _pick(columns: List[str], aliases: Tuple[str, ...]):
     """First alias present in the file, as a column; NULL when none of them is."""
@@ -475,7 +213,11 @@ def lift_flat(df: "DataFrame", channel_default: str = "web") -> "DataFrame":
     # Timestamps are re-emitted in UTC ISO-8601, the exact form the streaming
     # path hashes. A row whose timestamp will not parse keeps a NULL and is
     # turned away by the checks rather than landing in a wrong partition.
-    occurred_ts = parse_timestamp(event["occurred_at"])
+    # Screened by regex before parsing: Spark runs ANSI mode from 4.0, where a
+    # bare to_timestamp on a malformed string *raises* — one unparseable date in
+    # a partner export would abort the job instead of quarantining one row.
+    normalized = F.regexp_replace(event["occurred_at"], "Z$", "+00:00")
+    occurred_ts = F.to_timestamp(F.when(normalized.rlike(ISO_TIMESTAMP_RE), normalized))
     occurred_at = F.date_format(occurred_ts, "yyyy-MM-dd'T'HH:mm:ssXXX")
 
     unit_price = F.coalesce(event["unit_price"].cast("double"), product["price"].cast("double"))
@@ -542,7 +284,12 @@ def lift_flat(df: "DataFrame", channel_default: str = "web") -> "DataFrame":
             event["utm_source"].cast("string").alias("source"),
             event["utm_medium"].cast("string").alias("medium"),
         ).alias("marketing"),
-        F.lit(None).cast(v3_schema()["_meta"].dataType).alias("_meta"),
+        F.struct(
+            F.lit(None).cast("string").alias("processed_at"),
+            F.lit(None).cast("string").alias("source"),
+            F.lit(None).cast("string").alias("message_id"),
+            F.lit(None).cast("string").alias("source_object"),
+        ).alias("_meta"),
     )
 
 
@@ -611,7 +358,7 @@ def _read_json(spark: "SparkSession", paths: List[str]) -> "DataFrame":
     """Seam for the tests — already-v3 records, read with the schema."""
     return (
         spark.read
-        .schema(v3_schema())
+        .schema(v3_schema(spark))
         .option("mode", "PERMISSIVE")
         .json(paths)
     )
@@ -630,7 +377,7 @@ def read_drops(spark: "SparkSession", bucket: str, drops: List[Dict[str, str]],
     json_paths = [f"s3://{bucket}/{d['key']}" for d in drops if d["format"] == "json"]
     if json_paths:
         logger.info("Reading %d JSON drop(s)", len(json_paths))
-        frames.append(_read_json(spark, json_paths).select(*[f.name for f in v3_schema().fields]))
+        frames.append(_read_json(spark, json_paths))
 
     if not frames:
         return None
@@ -664,7 +411,8 @@ def split_on_checks(df: "DataFrame", checks: List[Dict[str, str]]) -> Tuple["Dat
 
 def with_partitions(df: "DataFrame") -> "DataFrame":
     """Partition on *event* time, so a late file lands in the hour it belongs to."""
-    occurred_ts = parse_timestamp(F.col("occurred_at"))
+    normalized = F.regexp_replace(F.col("occurred_at"), "Z$", "+00:00")
+    occurred_ts = F.to_timestamp(F.when(normalized.rlike(ISO_TIMESTAMP_RE), normalized))
     return (
         df
         .withColumn("dt", F.coalesce(F.date_format(occurred_ts, "yyyy-MM-dd"), F.lit("unknown")))
@@ -707,32 +455,27 @@ def archive(bucket: str, drops: List[Dict[str, str]], destination_prefix: str, s
 # CONFIG + ENTRYPOINT
 # ─────────────────────────────────────────────
 
-def load_config(path: str, s3: Any = None) -> dict:
-    logger.info("Loading config from %s", path)
-    if path.startswith("s3://"):
-        bucket, _, key = path[len("s3://"):].partition("/")
-        s3 = s3 or boto3.client("s3")
-        return json.loads(s3.get_object(Bucket=bucket, Key=key)["Body"].read().decode("utf-8"))
-
-    with open(path, "r", encoding="utf-8") as handle:
-        return json.load(handle)
+def _norm(prefix: str) -> str:
+    """``"/inbox"`` -> ``"inbox/"``; the empty prefix stays empty."""
+    prefix = str(prefix).strip().strip("/")
+    return f"{prefix}/" if prefix else ""
 
 
 def ingest_prefix(config: dict) -> str:
     """Where the partners drop their files."""
-    return f"{zone_prefix(config, 'landing')}{_norm(config.get('LANDING_INGEST_SUBPATH', DEFAULT_INGEST_SUBPATH))}"
+    return f"{lakehouse.zone_prefix(config, 'landing')}{_norm(config.get('LANDING_INGEST_SUBPATH', DEFAULT_INGEST_SUBPATH))}"
 
 
 def archive_prefix(config: dict) -> str:
     """Where they go once bronze has them."""
-    return f"{zone_prefix(config, 'landing')}{_norm(config.get('LANDING_ARCHIVE_SUBPATH', DEFAULT_ARCHIVE_SUBPATH))}"
+    return f"{lakehouse.zone_prefix(config, 'landing')}{_norm(config.get('LANDING_ARCHIVE_SUBPATH', DEFAULT_ARCHIVE_SUBPATH))}"
 
 
 def run(config: Dict[str, Any], spark: Any = None, s3: Any = None) -> Dict[str, Any]:
     started = datetime.now(timezone.utc)
     bucket = config["OUTPUT_BUCKET"]
-    paths = build_paths(config)
-    metrics = JobMetrics.from_config(config, stage="glue_landing_ingest")
+    paths = lakehouse.build_paths(config)
+    metrics = MetricsEmitter.from_config(config, stage="glue_landing_ingest")
 
     s3 = s3 or boto3.client("s3")
     drops = list_drops(bucket, ingest_prefix(config), s3=s3)
@@ -793,8 +536,11 @@ def run(config: Dict[str, Any], spark: Any = None, s3: Any = None) -> Dict[str, 
 
 
 def main(argv=None) -> Dict[str, Any]:
-    argv = argv if argv is not None else sys.argv
-    args = getResolvedOptions(argv, ["JOB_NAME", "CONFIG_PATH"])
+    return glue_entrypoint(run, argv)
+
+
+def main(argv=None) -> Dict[str, Any]:
+    args = getResolvedOptions(argv if argv is not None else sys.argv, ["JOB_NAME", "CONFIG_PATH"])
     config = load_config(args["CONFIG_PATH"])
     config.setdefault("JOB_NAME", args.get("JOB_NAME"))
     return run(config)

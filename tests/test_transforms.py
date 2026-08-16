@@ -55,7 +55,7 @@ def _raw_row(record):
 
 
 def _raw_df(spark, records):
-    return spark.createDataFrame([_raw_row(r) for r in records], schema=silver.raw_schema())
+    return spark.createDataFrame([_raw_row(r) for r in records], schema=silver.v3_schema())
 
 
 def _event(event_type, product_id="sku-1", price=100.0, **overrides):
@@ -460,7 +460,7 @@ def test_quality_summary_counts_retention_and_nulls(spark):
 
 
 def test_quality_summary_of_an_empty_batch(spark):
-    empty = spark.createDataFrame([], schema=silver.raw_schema())
+    empty = spark.createDataFrame([], schema=silver.v3_schema())
     summary = silver.quality_summary(empty, silver.to_processed(empty))
 
     assert summary["raw_records"] == 0
