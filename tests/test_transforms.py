@@ -3,7 +3,7 @@
 The whole module is skipped when PySpark is missing (the `spark` fixture calls
 `importorskip`), so the pure-Python suite still runs in a bare environment.
 
-Filesystem round-trips (`read_raw` / `write_dataset`) additionally need a
+The filesystem round-trip additionally needs a
 working local Hadoop filesystem, which Windows lacks without `winutils.exe`.
 Those two tests probe for it and skip rather than fail — the transformation
 tests, which are where the logic lives, run everywhere PySpark does.
@@ -483,7 +483,9 @@ def _local_fs_works(spark, tmp_path) -> bool:
         return False
 
 
-def test_read_raw_and_write_dataset_round_trip(spark, tmp_path):
+def test_bronze_to_silver_round_trips_through_the_filesystem(spark, tmp_path):
+    """Read NDJSON off disk, process it, write the partitioned Parquet, read it
+    back — the one test that exercises the job's real I/O rather than a stub."""
     if not _local_fs_works(spark, tmp_path):
         pytest.skip("Spark local filesystem unavailable (winutils.exe missing on Windows)")
 
@@ -498,7 +500,14 @@ def test_read_raw_and_write_dataset_round_trip(spark, tmp_path):
     assert raw.count() == 2
 
     processed = silver.to_processed(raw)
-    out = str(tmp_path / "processed").replace("\\", "/")
-    silver.write_dataset(processed, out, partition_by=["partition_date", "partition_hour"], coalesce=1)
+    out = str(tmp_path / "silver").replace("\\", "/")
+    # Written the way the job writes it: coalesced, partitioned on event time.
+    (
+        processed.coalesce(1).write.mode("overwrite")
+        .partitionBy("partition_date", "partition_hour")
+        .parquet(out)
+    )
 
-    assert spark.read.parquet(out).count() == 2
+    written = spark.read.parquet(out)
+    assert written.count() == 2
+    assert {"partition_date", "partition_hour"} <= set(written.columns)
