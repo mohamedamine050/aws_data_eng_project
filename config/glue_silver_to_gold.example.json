@@ -1,5 +1,5 @@
 {
-  "_comment": "Glue job 4 \u2014 silver/events -> gold/*. Pass as --CONFIG_PATH.",
+  "_comment": "Glue job 3 \u2014 silver/events -> gold/*. Pass as --CONFIG_PATH.",
   "OUTPUT_BUCKET": "my-data-lake",
   "ENVIRONMENT": "dev",
   "METRICS_ENABLED": true,

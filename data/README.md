@@ -31,10 +31,10 @@ aws s3 cp data/catalog/  s3://$OUTPUT_BUCKET/catalog/  --recursive
 aws s3 cp data/landing/partner_events.csv s3://$OUTPUT_BUCKET/landing/partners/
 ```
 
-The second command is the whole of source ②: the `ObjectCreated` notification on
-`landing/partners/` goes through EventBridge and starts the Glue job, which
-expands the file into events, writes them to `bronze/events/`, and moves the
-file to `landing/_processed/` so the next run does not read it twice.
+The second command is the whole of source ②. The file then waits in the drop zone
+until the next run of the pipeline: `glue_landing_ingest` lists what is there,
+expands each file into events, writes them to `bronze/events/`, and moves the file
+to `landing/_processed/` so the following run does not read it twice.
 
 ## About the flat CSV
 

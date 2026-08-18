@@ -16,7 +16,7 @@ import pytest
 
 pytest.importorskip("pyspark", reason="PySpark not installed")
 
-import jobs.glue_ecommerce_processing as silver  # noqa: E402
+import jobs.glue_bronze_to_silver as silver  # noqa: E402
 import jobs.glue_silver_to_gold as gold  # noqa: E402
 from common.ecommerce_schema import normalize_record  # noqa: E402
 from common.event_simulator import simulate  # noqa: E402

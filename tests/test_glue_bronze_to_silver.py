@@ -6,9 +6,9 @@ from pathlib import Path
 _SRC = Path(__file__).resolve().parent.parent / "src"
 sys.path.insert(0, str(_SRC))
 
-import jobs.glue_ecommerce_processing as glue_job
+import jobs.glue_bronze_to_silver as glue_job
 
-from jobs.glue_ecommerce_processing import (
+from jobs.glue_bronze_to_silver import (
     _clean_numeric,
     _clean_string,
     _enrich_record,

@@ -1,10 +1,10 @@
-"""Scheduled e-commerce producer Lambda (EventBridge -> Lambda -> SQS).
+"""E-commerce producer Lambda (Step Functions -> Lambda -> SQS).
 
-A *single-batch* producer, triggered on a schedule by Amazon EventBridge:
+A *single-batch* producer, invoked as the first step of the pipeline:
 
-    EventBridge (rate/cron) ──> [this Lambda] ──> Amazon SQS queue
+    Step Functions ──> [this Lambda] ──> Amazon SQS queue
 
-There is no loop — EventBridge controls the cadence, the function does one batch
+There is no loop — the state machine controls the cadence, the function does one batch
 and returns.
 
 Two generation modes

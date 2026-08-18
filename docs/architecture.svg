@@ -1,6 +1,6 @@
 <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1560 900" width="1560" height="900"
      font-family="Segoe UI, Helvetica Neue, Helvetica, Arial, sans-serif" role="img"
-     aria-label="Architecture AWS du pipeline e-commerce : deux sources alimentent SQS et deux Lambda qui déposent les événements dans un lac S3 ; cinq jobs AWS Glue ingèrent les fichiers, transforment bronze en silver, auditent la qualité, construisent le gold et chargent PostgreSQL, le tout orchestré par Step Functions et supervisé par CloudWatch.">
+     aria-label="Architecture AWS du pipeline e-commerce : deux sources alimentent SQS et deux Lambda qui déposent les événements dans un lac S3 ; quatre jobs AWS Glue ingèrent les fichiers, transforment bronze en silver, construisent le gold et chargent PostgreSQL, le tout orchestré par Step Functions et supervisé par CloudWatch.">
 
   <defs>
     <linearGradient id="gCompute" x1="0" y1="0" x2="0" y2="1">
@@ -36,20 +36,10 @@
   <rect x="0" y="0" width="1560" height="900" fill="#FFFFFF"/>
 
   <text x="28" y="34" font-size="18" font-weight="700" fill="#16202B">E-commerce lakehouse — architecture AWS</text>
-  <text x="28" y="54" font-size="12.5" fill="#68767F">2 sources · lac S3 en médaillon · 5 jobs Glue, chacun avec son entrée et sa sortie · entrepôt PostgreSQL</text>
+  <text x="28" y="54" font-size="12.5" fill="#68767F">2 sources · lac S3 en médaillon · 4 jobs Glue, chacun avec son entrée et sa sortie · entrepôt PostgreSQL</text>
 
   <!-- ═════════════ BANDE 1 — INGESTION ═════════════ -->
   <text x="28" y="92" font-size="11.5" font-weight="700" fill="#8A97A4" letter-spacing="1.6">INGESTION</text>
-
-  <!-- EventBridge -->
-  <rect x="264" y="24" width="72" height="72" rx="14" fill="url(#gIntegration)"/>
-  <g stroke="#FFFFFF" stroke-width="2.2" fill="none" stroke-linecap="round">
-    <circle cx="300" cy="60" r="7" fill="#FFFFFF" stroke="none"/>
-    <path d="M300 42 v8 M300 70 v8 M282 60 h8 M310 60 h8"/>
-    <path d="M287 47 l6 6 M313 73 l-6 -6 M313 47 l-6 6 M287 73 l6 -6"/>
-  </g>
-  <text x="300" y="116" font-size="12.5" font-weight="600" fill="#16202B" text-anchor="middle">Amazon EventBridge</text>
-  <text x="300" y="132" font-size="11" fill="#68767F" text-anchor="middle">déclenche toutes les 5 min</text>
 
   <!-- ① source card -->
   <rect x="30" y="152" width="156" height="84" rx="8" fill="#FFFFFF" stroke="#B9C4CE" stroke-width="1.4"/>
@@ -113,12 +103,16 @@
     <path d="M1126 179 h8"/><path d="M1118 186 v10 h12"/><path d="M1142 186 v10 h-12"/>
   </g>
   <text x="1130" y="252" font-size="13.5" font-weight="600" fill="#16202B" text-anchor="middle">AWS Step Functions</text>
-  <text x="1130" y="268" font-size="11" fill="#68767F" text-anchor="middle">enchaîne les 5 jobs</text>
-  <text x="1130" y="283" font-size="11" fill="#68767F" text-anchor="middle">1 → 2 → 3 → 4 → 5, une fois/jour</text>
+  <text x="1130" y="268" font-size="11" fill="#68767F" text-anchor="middle">enchaîne tout le pipeline</text>
+  <text x="1130" y="283" font-size="11" fill="#68767F" text-anchor="middle">λ → 1 → 2 → 3 → 4, une fois/jour</text>
+
+  <!-- Step Functions invoque la Lambda producer : premier pas de la chaîne -->
+  <path d="M1130 158 V118 H300 V148" fill="none" stroke="#42505E" stroke-width="1.8"
+        stroke-dasharray="6 5" marker-end="url(#arrow)"/>
+  <text x="700" y="110" font-size="10.5" fill="#68767F" text-anchor="middle">1 · invoque la Lambda producer</text>
 
   <!-- flow, band 1 -->
   <g fill="none" stroke="#42505E" stroke-width="2" marker-end="url(#arrow)">
-    <line x1="300" y1="96" x2="300" y2="152"/>
     <line x1="186" y1="194" x2="258" y2="194"/>
     <line x1="336" y1="194" x2="448" y2="194"/>
     <line x1="526" y1="194" x2="638" y2="194"/>
@@ -196,7 +190,7 @@
     <circle cx="0" cy="0" r="4" fill="#FFFFFF"/>
   </g>
   <text x="660" y="576" font-size="13.5" font-weight="600" fill="#16202B" text-anchor="middle">AWS Glue</text>
-  <text x="660" y="592" font-size="11" font-weight="700" fill="#7A29FF" text-anchor="middle">job 4 — silver → gold</text>
+  <text x="660" y="592" font-size="11" font-weight="700" fill="#7A29FF" text-anchor="middle">job 3 — silver → gold</text>
   <text x="660" y="607" font-size="11" fill="#68767F" text-anchor="middle">agrège les 6 tables</text>
 
   <!-- gold -->
@@ -216,7 +210,7 @@
     <circle cx="0" cy="0" r="4" fill="#FFFFFF"/>
   </g>
   <text x="1020" y="576" font-size="13.5" font-weight="600" fill="#16202B" text-anchor="middle">AWS Glue</text>
-  <text x="1020" y="592" font-size="11" font-weight="700" fill="#7A29FF" text-anchor="middle">job 5 — lac → entrepôt</text>
+  <text x="1020" y="592" font-size="11" font-weight="700" fill="#7A29FF" text-anchor="middle">job 4 — lac → entrepôt</text>
   <text x="1020" y="607" font-size="11" fill="#68767F" text-anchor="middle">7 tables, une passe JDBC</text>
 
   <!-- RDS -->
@@ -258,49 +252,24 @@
   </g>
   <text x="750" y="440" font-size="10.5" fill="#68767F" text-anchor="middle">le job 5 charge aussi silver → analytics.fact_events</text>
 
-  <!-- ═════════════ JOB 2 — LE CONTRÔLE QUALITÉ ═════════════ -->
-  <g transform="translate(480,716)">
-    <rect x="-36" y="-36" width="72" height="72" rx="14" fill="url(#gAnalytics)"/>
-    <g stroke="#FFFFFF" stroke-width="3" fill="none" stroke-linecap="round">
-      <circle cx="0" cy="0" r="11"/>
-      <path d="M0 -18 v-5 M0 23 v-5 M-18 0 h-5 M23 0 h-5"/>
-      <path d="M-13 -13 l-4 -4 M13 13 l4 4 M13 -13 l4 -4 M-13 13 l-4 4"/>
-    </g>
-    <circle cx="0" cy="0" r="4" fill="#FFFFFF"/>
+  <!-- ═════════════ LES SORTIES QUALITÉ DU JOB 2 ═════════════ -->
+  <path d="M400 700 h20 l6 7 h34 v41 h-60 z" fill="#F7E2DE" stroke="#C7402C" stroke-width="1.5"/>
+  <path d="M400 712 h60" stroke="#C7402C" stroke-width="1"/>
+  <text x="430" y="764" font-size="11.5" font-weight="700" fill="#C7402C" text-anchor="middle">quarantine/</text>
+  <text x="430" y="779" font-size="10.5" fill="#68767F" text-anchor="middle">lignes + règles violées</text>
+
+  <path d="M580 700 h20 l6 7 h34 v41 h-60 z" fill="#EFF3F6" stroke="#8A97A4" stroke-width="1.5"/>
+  <path d="M580 712 h60" stroke="#8A97A4" stroke-width="1"/>
+  <text x="610" y="764" font-size="11.5" font-weight="700" fill="#42505E" text-anchor="middle">quality/</text>
+  <text x="610" y="779" font-size="10.5" fill="#68767F" text-anchor="middle">rapport du lot</text>
+
+  <g fill="none" stroke="#42505E" stroke-width="2" marker-end="url(#arrow)">
+    <polyline points="300,546 300,660 430,660 430,694"/>
+    <polyline points="300,660 610,660 610,694"/>
   </g>
-  <text x="480" y="776" font-size="13.5" font-weight="600" fill="#16202B" text-anchor="middle">AWS Glue</text>
-  <text x="480" y="792" font-size="11" font-weight="700" fill="#7A29FF" text-anchor="middle">job 3 — audit du lot</text>
-  <text x="480" y="807" font-size="11" fill="#68767F" text-anchor="middle">12 contrôles, un seul passage</text>
-
-  <!-- quarantine -->
-  <path d="M650 664 h20 l6 7 h34 v41 h-60 z" fill="#F7E2DE" stroke="#C7402C" stroke-width="1.5"/>
-  <path d="M650 676 h60" stroke="#C7402C" stroke-width="1"/>
-  <text x="680" y="728" font-size="11.5" font-weight="700" fill="#C7402C" text-anchor="middle">quarantine/</text>
-  <text x="680" y="743" font-size="10.5" fill="#68767F" text-anchor="middle">lignes + règles violées</text>
-
-  <!-- quality -->
-  <path d="M650 780 h20 l6 7 h34 v41 h-60 z" fill="#EFF3F6" stroke="#8A97A4" stroke-width="1.5"/>
-  <path d="M650 792 h60" stroke="#8A97A4" stroke-width="1"/>
-  <text x="680" y="844" font-size="11.5" font-weight="700" fill="#42505E" text-anchor="middle">quality/</text>
-  <text x="680" y="859" font-size="10.5" fill="#68767F" text-anchor="middle">rapport pass/warn/fail</text>
-
-  <!-- silver → job 2, and job 2's two outputs -->
-  <g fill="none" stroke="#42505E" stroke-width="2.2" marker-end="url(#arrow)">
-    <line x1="480" y1="546" x2="480" y2="674"/>
-  </g>
-  <text x="490" y="620" font-size="10.5" fill="#68767F">audite la partition</text>
-
-  <g fill="none" stroke="#C7402C" stroke-width="2" marker-end="url(#arrowRed)">
-    <polyline points="516,700 580,700 580,690 644,690"/>
-    <polyline points="516,732 580,732 580,806 644,806"/>
-  </g>
-
-  <!-- the gate: gold is only built once the audit passes -->
-  <g fill="none" stroke="#7A29FF" stroke-width="2.2" stroke-dasharray="7 4" marker-end="url(#arrowGold)">
-    <polyline points="480,752 578,752 578,500 614,500"/>
-  </g>
-  <text x="586" y="746" font-size="10.5" font-weight="700" fill="#7A29FF">verdict = pass</text>
-  <text x="586" y="760" font-size="10" fill="#7A29FF">sinon le gold n'est pas reconstruit</text>
+  <text x="312" y="652" font-size="10.5" fill="#68767F">le job 2 note le lot qu'il vient d'écrire</text>
+  <text x="646" y="722" font-size="10" fill="#C7402C">FAIL_ON_QUALITY : un dépassement</text>
+  <text x="646" y="736" font-size="10" fill="#C7402C">interrompt le job, et la chaîne s'arrête</text>
 
   <!-- ═════════════ CLOUDWATCH ═════════════ -->
   <rect x="1174" y="676" width="72" height="72" rx="14" fill="url(#gIntegration)"/>
@@ -320,7 +289,7 @@
   <g fill="none" stroke="#8A97A4" stroke-width="1.8" stroke-dasharray="6 4" marker-end="url(#arrowSoft)">
     <polyline points="1130,236 1130,340 1330,340 1330,470"/>
   </g>
-  <text x="1140" y="332" font-size="10.5" fill="#68767F">orchestre les 5 jobs Glue</text>
+  <text x="1140" y="332" font-size="10.5" fill="#68767F">orchestre les 4 jobs Glue</text>
 
   <text x="28" y="884" font-size="11" fill="#8A97A4">Médaillon : bronze (brut, rejouable) → silver (nettoyé, dédoublonné sur idempotency_key) → gold (une table par question). Le job 3 passe avant le job 4 : en amont de la publication c'est une barrière, en aval ce ne serait qu'un rapport.</text>
 </svg>

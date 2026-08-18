@@ -2,8 +2,8 @@
 
 The **data engineering code** for a serverless e-commerce pipeline on AWS: two
 independent ingestion paths — one streaming, one batch — a medallion data lake
-on S3 (bronze → silver → gold), five Glue jobs, a quality gate that can stop a
-bad day from reaching production, and a PostgreSQL warehouse at the end of it.
+on S3 (bronze → silver → gold), four Glue jobs, quality rules that quarantine a
+bad record instead of losing it, and a PostgreSQL warehouse at the end of it.
 
 This repo contains the **scripts and the SQL** — the logic of each stage — not
 the infrastructure. Provision the AWS resources with your IaC tool of choice
@@ -25,7 +25,6 @@ flowchart TB
 
     subgraph ING["INGESTION"]
         direction TB
-        EB(["EventBridge<br/>schedule"])
         L1["<b>λ ecommerce_producer</b><br/>sessions · quality gate<br/>SendMessageBatch"]
         Q[["<b>SQS</b><br/>ecommerce-events<br/><i>+ DLQ</i>"]]
         L2["<b>λ stream_processor</b><br/>SQS · dedupe<br/>· quality rules"]
@@ -41,13 +40,12 @@ flowchart TB
         QLT[("<b>quality/</b><br/><i>one report per run</i>")]
     end
 
-    subgraph GLUE["FIVE GLUE JOBS"]
+    subgraph GLUE["FOUR GLUE JOBS"]
         direction TB
         J0["<b>1 · landing_ingest</b><br/>lift CSV · move files"]
-        J1["<b>2 · bronze_to_silver</b><br/>flatten · clean · dedupe"]
-        J2["<b>3 · quality_audit</b><br/>12 checks · quarantine"]
-        J3["<b>4 · silver_to_gold</b><br/>the analytical tables"]
-        J4["<b>5 · rds_load</b><br/>multi-table JDBC"]
+        J1["<b>2 · bronze_to_silver</b><br/>flatten · clean · dedupe<br/>· quality report"]
+        J3["<b>3 · silver_to_gold</b><br/>the analytical tables"]
+        J4["<b>4 · rds_load</b><br/>multi-table JDBC"]
     end
 
     subgraph WH["WAREHOUSE"]
@@ -55,10 +53,10 @@ flowchart TB
         BI["BI / SQL"]
     end
 
-    SF{{"Step Functions<br/><i>daily orchestration</i>"}}
+    SF{{"Step Functions<br/><i>orchestrates the whole chain</i>"}}
     CW{{"CloudWatch<br/><i>custom metrics</i>"}}
 
-    EB --> L1
+    SF ==> L1
     S1 --> L1
     L1 --> Q --> L2
     S2 --> LAND
@@ -67,16 +65,13 @@ flowchart TB
 
     LAND --> J0 --> BRZ
     BRZ --> J1 --> SLV
-    SLV --> J2
-    J2 --> QLT
-    J2 --> QAR
-    J2 ==>|"verdict = pass"| J3
+    J1 --> QLT
     SLV --> J3 --> GLD
     SLV --> J4
     GLD --> J4 --> PG --> BI
 
-    SF -.-> J0 & J1 & J2 & J3 & J4
-    L1 & L2 & J0 & J1 & J2 & J3 & J4 -.-> CW
+    SF -.-> J0 & J1 & J3 & J4
+    L1 & L2 & J0 & J1 & J3 & J4 -.-> CW
 ```
 
 ### The medallion layers
@@ -171,14 +166,14 @@ one is built for files that arrive occasionally and are large when they do.
 
 ```mermaid
 sequenceDiagram
-    participant EB as EventBridge
+    participant EB as Step Functions
     participant P as producer λ
     participant API as Catalog API
     participant Q as SQS
     participant SP as stream_processor λ
     participant S3 as bronze/events
 
-    EB->>P: schedule fires (rate 5 min)
+    EB->>P: invoke (first step of the chain)
     P->>API: GET /products
     API-->>P: catalog (a failure here is logged and skipped)
     P->>P: simulate sessions → v3 records
@@ -190,37 +185,42 @@ sequenceDiagram
     SP-->>Q: batchItemFailures (only the failed messageIds retry)
 ```
 
-The producer never loops: EventBridge owns the cadence, the function does one
-batch and returns. On a `.fifo` queue the schema's `idempotency_key` doubles as
+The producer never loops: the state machine owns the cadence, the function does
+one batch and returns. On a `.fifo` queue the schema's `idempotency_key` doubles as
 the SQS deduplication id.
 
 ---
 
-## The five Glue jobs
+## The four Glue jobs
 
 | # | Job | In → Out | What it decides |
 |---|-----|----------|-----------------|
 | 1 | [`glue_landing_ingest.py`](src/jobs/glue_landing_ingest.py) | `landing/partners/` → `bronze/events/` | Lifts a partner's flat CSV into the v3 record — nested blocks, basket arithmetic, and the *same* identity hash the streaming path produces. Ingested files are moved to `landing/_processed/`, so the next run does not re-read them. |
-| 2 | [`glue_ecommerce_processing.py`](src/jobs/glue_ecommerce_processing.py) | `bronze/events/` → `silver/events/` | Flatten, clean, derive, deduplicate on `idempotency_key` with a window function — which makes the job **safe to re-run over an overlapping window**. |
-| 3 | [`glue_quality_audit.py`](src/jobs/glue_quality_audit.py) | `silver/` → `quality/` + `quarantine/` | Twelve declarative checks in one pass. Answers what a per-record Lambda cannot: *is this batch trustworthy?* |
-| 4 | [`glue_silver_to_gold.py`](src/jobs/glue_silver_to_gold.py) | `silver/` → `gold/` | The six analytical tables — sessions, funnel, orders, RFM, product performance, anomalies. |
-| 5 | [`glue_rds_load.py`](src/jobs/glue_rds_load.py) | `silver/` + `gold/` → PostgreSQL | Seven tables, one connection profile, one pass. `overwrite` truncates rather than dropping, so grants and indexes survive. |
+| 2 | [`glue_bronze_to_silver.py`](src/jobs/glue_bronze_to_silver.py) | `bronze/events/` → `silver/events/` | Flatten, clean, derive, deduplicate on `idempotency_key` with a window function — which makes the job **safe to re-run over an overlapping window**. |
+| 3 | [`glue_silver_to_gold.py`](src/jobs/glue_silver_to_gold.py) | `silver/` → `gold/` | The six analytical tables — sessions, funnel, orders, RFM, product performance, anomalies. |
+| 4 | [`glue_rds_load.py`](src/jobs/glue_rds_load.py) | `silver/` + `gold/` → PostgreSQL | Seven tables, one connection profile, one pass. `overwrite` truncates rather than dropping, so grants and indexes survive. |
 
 Each job takes its own `--CONFIG_PATH`; see [`config/`](config/) for a
 commented example per job.
 
-### Why jobs 2 and 4 are separate
+### Why jobs 2 and 3 are separate
 
 Silver is written off a small hourly delta. Gold recomputes windows that span
 days. Splitting them lets each run on its own schedule and worker count, and be
 retried without redoing the other — and it keeps each script to one layer, which
 is what lets both stay self-contained.
 
-### Why job 3 runs *before* job 4
+### Where the gate lives now
 
-A quality gate downstream of publication is a report; upstream of it, it is a
-gate. If silver breaches its thresholds, gold and the warehouse keep yesterday's
-numbers, which are better than today's wrong ones.
+There is no separate audit job. Job 2 scores the batch it just wrote — retention,
+duplicates, null rates — into `quality/dt=…/report-*.json`, and `FAIL_ON_QUALITY:
+true` in its config makes a breach abort the job. Because Step Functions stops on
+that failure, gold and the warehouse keep yesterday's numbers, which are better
+than today's wrong ones.
+
+What was lost with the audit job is the *depth* of the check: twelve declarative
+rules evaluated row by row against silver, with the offending rows copied to
+`quarantine/audit/`. What remains is a batch score and a threshold.
 
 ---
 
@@ -292,24 +292,28 @@ Notes worth knowing before the first load:
 
 ```mermaid
 flowchart LR
-    START(( )) --> Z
+    START(( )) --> P
+    P["<b>λ</b> ProduceEvents"]
     Z["<b>1</b> IngestPartnerDrops"]
     A["<b>2</b> BronzeToSilver"]
-    B["<b>3</b> QualityAudit"]
-    C["<b>4</b> SilverToGold"]
-    D["<b>5</b> LoadWarehouse"]
-    X["QualityGateFailed<br/><i>SNS alert · gold untouched</i>"]
+    C["<b>3</b> SilverToGold"]
+    D["<b>4</b> LoadWarehouse"]
+    X["<i>gold untouched</i>"]
     OK((( )))
 
-    Z --> A --> B
-    B -->|"pass / warn"| C --> D --> OK
-    B -->|fail| X
+    P --> W["<i>wait — let SQS drain</i>"] --> Z --> A
+    A -->|"quality ok"| C --> D --> OK
+    A -->|"FAIL_ON_QUALITY"| X
 ```
 
-The state machine definition, the EventBridge schedules, the SQS event source
-mapping, the S3 notification and the CloudWatch alarms are all in
-[`config/orchestration/`](config/orchestration/). They are reference material
-for your IaC — no code reads them.
+The state machine definition, the SQS event source mapping, the Glue crawler and
+the CloudWatch alarms are all in [`config/orchestration/`](config/orchestration/).
+They are reference material for your IaC — no code reads them.
+
+There is no EventBridge in this design: the state machine invokes the producer
+Lambda itself, so exactly **one** thing needs scheduling from outside instead of
+three rules to keep in step. The cost is latency on the partner files — a drop is
+picked up on the next run of the chain rather than seconds after it lands.
 
 ---
 
@@ -329,10 +333,9 @@ src/
     stream_processor/      sources ① ② — the landing zone
   jobs/                    one file = one Glue job, standalone
     glue_landing_ingest.py        job 1 — landing → bronze (source ②)
-    glue_ecommerce_processing.py  job 2 — bronze → silver
-    glue_quality_audit.py         job 3 — the quality gate
-    glue_silver_to_gold.py        job 4 — silver → gold
-    glue_rds_load.py              job 5 — → PostgreSQL
+    glue_bronze_to_silver.py  job 2 — bronze → silver
+    glue_silver_to_gold.py        job 3 — silver → gold
+    glue_rds_load.py              job 4 — → PostgreSQL
 sql/warehouse/           warehouse schema, views, upsert path, example queries
 config/                  one commented example per component + orchestration/
 data/                    sample catalog + a partner export, ready to drop on S3
@@ -375,13 +378,13 @@ layer.
 
 ## Quality
 
-The same rule set runs in two places, on purpose, so "rejected here" and
-"flagged there" can never mean two different things:
+Quality is checked twice, at two different grains — once per record as it lands,
+once per batch after silver is written:
 
 | Where | Grain | On failure |
 |-------|-------|------------|
 | `stream_processor` λ ([`common/quality.py`](src/common/quality.py)) | one queued record | `error` → `quarantine/events/` with the rule names. `warn` → kept, score degraded |
-| `glue_quality_audit` job | the batch | `error` rows → `quarantine/audit/`. Breaching a threshold → `fail`, which stops the gold job |
+| `glue_bronze_to_silver` job | the batch | a score in `quality/dt=…/report-*.json`; with `FAIL_ON_QUALITY` a breach aborts the job, and Step Functions stops the chain |
 
 Checks are data, not control flow. Adding one is an entry in a list — in the
 config, if you would rather not redeploy:

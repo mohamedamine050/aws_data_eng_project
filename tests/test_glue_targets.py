@@ -7,7 +7,7 @@ run without a cluster.
 
 import pytest
 
-import jobs.glue_ecommerce_processing as processing
+import jobs.glue_bronze_to_silver as processing
 import jobs.glue_rds_load as rds
 
 

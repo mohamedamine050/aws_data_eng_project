@@ -6,7 +6,7 @@ from unittest.mock import MagicMock
 
 import pytest
 
-# Mock awsglue module before importing glue_ecommerce_processing
+# Mock awsglue module before importing glue_bronze_to_silver
 sys.modules['awsglue'] = MagicMock()
 sys.modules['awsglue.utils'] = MagicMock()
 
