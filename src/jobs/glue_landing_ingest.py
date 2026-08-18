@@ -423,7 +423,7 @@ ISO_TIMESTAMP_RE = r"^\d{4}-\d{2}-\d{2}[T ]\d{2}:\d{2}"
 
 def load_config(path: str, s3: Any = None) -> dict:
     """Read a job's JSON config, from S3 or from disk."""
-    LOGGER.info("Loading config from %s", path)
+    logger.info("Loading config from %s", path)
     if path.startswith("s3://"):
         bucket, _, key = path[len("s3://"):].partition("/")
         s3 = s3 or boto3.client("s3")
@@ -703,12 +703,6 @@ def archive(bucket: str, drops: List[Dict[str, str]], destination_prefix: str, s
 # CONFIG + ENTRYPOINT
 # ─────────────────────────────────────────────
 
-def _norm(prefix: str) -> str:
-    """``"/inbox"`` -> ``"inbox/"``; the empty prefix stays empty."""
-    prefix = str(prefix).strip().strip("/")
-    return f"{prefix}/" if prefix else ""
-
-
 def ingest_prefix(config: dict) -> str:
     """Where the partners drop their files."""
     return f"{zone_prefix(config, 'landing')}{_norm(config.get('LANDING_INGEST_SUBPATH', DEFAULT_INGEST_SUBPATH))}"
@@ -781,10 +775,6 @@ def run(config: Dict[str, Any], spark: Any = None, s3: Any = None) -> Dict[str, 
         "bronze_path": paths["bronze_events"],
         "duration_seconds": round((datetime.now(timezone.utc) - started).total_seconds(), 2),
     }
-
-
-def main(argv=None) -> Dict[str, Any]:
-    return glue_entrypoint(run, argv)
 
 
 def main(argv=None) -> Dict[str, Any]:

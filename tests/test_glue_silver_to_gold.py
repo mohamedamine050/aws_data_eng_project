@@ -4,6 +4,8 @@
 rather than in a 40-minute job.
 """
 
+from io import BytesIO
+
 import pytest
 
 import jobs.glue_silver_to_gold as gold
@@ -32,3 +34,30 @@ def test_the_pre_medallion_key_is_still_accepted():
 def test_an_unknown_dataset_fails_before_the_cluster_starts():
     with pytest.raises(ValueError, match="Unknown gold dataset"):
         gold.plan({"GOLD_DATASETS": ["dim_supplier"]})
+
+
+# ─────────────────────────────────────────────
+# CONFIG LOADING
+#
+# The job's first line of real work, and the one that failed on the cluster:
+# ``load_config`` logged through a ``LOGGER`` name this module never defined,
+# so every run died with a NameError before Spark started. Nothing here was
+# tested, which is exactly why nobody saw it. Both branches now run.
+# ─────────────────────────────────────────────
+
+def test_load_config_reads_a_local_file(tmp_path):
+    config = tmp_path / "config.json"
+    config.write_text('{"OUTPUT_BUCKET": "demo-bucket"}', encoding="utf-8")
+
+    assert gold.load_config(str(config))["OUTPUT_BUCKET"] == "demo-bucket"
+
+
+def test_load_config_reads_from_s3(monkeypatch):
+    class DummyS3:
+        def get_object(self, Bucket, Key):
+            assert (Bucket, Key) == ("demo", "jobs/gold.json")
+            return {"Body": BytesIO(b'{"GOLD_DATASETS": ["orders"]}')}
+
+    monkeypatch.setattr(gold.boto3, "client", lambda service: DummyS3())
+
+    assert gold.load_config("s3://demo/jobs/gold.json")["GOLD_DATASETS"] == ["orders"]

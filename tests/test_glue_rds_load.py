@@ -123,7 +123,7 @@ def test_resolve_rds_settings_missing_raises():
 
 def test_parse_args_local(monkeypatch):
     monkeypatch.setattr(glue_job, "getResolvedOptions", None)
-    monkeypatch.setattr(glue_job.os.sys, "argv", ["prog", "--config", "config.json"])
+    monkeypatch.setattr(glue_job.sys, "argv", ["prog", "--config", "config.json"])
 
     result = glue_job._parse_args()
 
@@ -131,17 +131,40 @@ def test_parse_args_local(monkeypatch):
     assert result["mode"] == "local"
 
 
-def test_parse_args_glue(monkeypatch):
+@pytest.mark.parametrize(
+    "argv",
+    [
+        # what Glue actually sends
+        ["prog", "--JOB_NAME", "ecommerce-rds-load", "--CONFIG_PATH", "s3://bucket/config.json"],
+        # the same, with the value attached
+        ["prog", "--JOB_NAME=ecommerce-rds-load", "--CONFIG_PATH=s3://bucket/config.json"],
+    ],
+)
+def test_parse_args_glue(monkeypatch, argv):
+    """The detection used to look for a bare ``JOB_NAME`` token.
+
+    Glue passes ``--JOB_NAME``, so the test never matched and the job fell
+    through to argparse, which exits on a missing ``--config``. These are the
+    real command lines.
+    """
     def fake_resolver(argv, keys):
         return {"JOB_NAME": "job", "CONFIG_PATH": "s3://bucket/config.json"}
 
     monkeypatch.setattr(glue_job, "getResolvedOptions", fake_resolver)
-    monkeypatch.setattr(glue_job.os.sys, "argv", ["prog", "JOB_NAME"])
+    monkeypatch.setattr(glue_job.sys, "argv", argv)
 
     result = glue_job._parse_args()
 
     assert result["config"] == "s3://bucket/config.json"
     assert result["mode"] == "glue"
+
+
+def test_parse_args_does_not_mistake_a_lookalike_for_a_glue_run(monkeypatch):
+    """``--config JOB_NAME.json`` is a local run, not a Glue one."""
+    monkeypatch.setattr(glue_job, "getResolvedOptions", lambda argv, keys: pytest.fail("not Glue"))
+    monkeypatch.setattr(glue_job.sys, "argv", ["prog", "--config", "JOB_NAME.json"])
+
+    assert glue_job._parse_args()["mode"] == "local"
 
 
 def test_read_processed_dataset_missing_columns():

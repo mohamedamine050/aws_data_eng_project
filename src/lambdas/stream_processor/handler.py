@@ -34,7 +34,7 @@ import uuid
 from collections import defaultdict
 from datetime import date, datetime, timezone
 from typing import Any, Dict, List, Optional, Tuple
-from urllib.parse import unquote_plus, urlparse
+from urllib.parse import urlparse
 
 import boto3
 
@@ -111,7 +111,6 @@ def detect_source(event: Dict[str, Any]) -> str:
     """Identify the invocation mode from the event shape."""
     records = (event or {}).get("Records")
     if isinstance(records, list) and records:
-        first = records[0] if isinstance(records[0], dict) else {}
         return "sqs"
     if isinstance((event or {}).get("messages"), list):
         return "stepfunctions"
@@ -124,16 +123,6 @@ def collect_records(event: Dict[str, Any], source: str) -> List[Tuple[Optional[s
     ``item_id`` is the SQS ``messageId`` when there is one — it is what
     ``batchItemFailures`` must reference for a partial-batch retry.
     """
-    if source == "s3":
-        collected: List[Tuple[Optional[str], Dict[str, Any]]] = []
-        for bucket, key in _s3_locations(event.get("Records", [])):
-            try:
-                for row in expand_s3_batch(bucket, key):
-                    collected.append((None, row))
-            except Exception as exc:  # noqa: BLE001 - one unreadable file must not fail the batch
-                LOGGER.error("Failed to expand s3://%s/%s: %s", bucket, key, exc)
-        return collected
-
     if source == "sqs":
         raw_records = event.get("Records", [])
     elif source == "stepfunctions":

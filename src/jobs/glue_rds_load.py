@@ -32,6 +32,7 @@ import argparse
 import json
 import logging
 import os
+import sys
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
@@ -581,9 +582,19 @@ def load_targets(spark: "SparkSession", targets: List[Dict[str, Any]], settings:
     return results
 
 
+def _job_name_in(argv: List[str]) -> bool:
+    """Is this a Glue invocation?
+
+    Glue starts the script with ``--JOB_NAME <name> --CONFIG_PATH <path>``, and
+    a value may be attached with ``=``. Testing for the bare token ``JOB_NAME``
+    misses every real invocation, so strip the dashes and the ``=`` first.
+    """
+    return any(arg.lstrip("-").split("=", 1)[0] == "JOB_NAME" for arg in argv)
+
+
 def _parse_args() -> dict:
-    if getResolvedOptions and len(os.sys.argv) > 1 and "JOB_NAME" in os.sys.argv:
-        resolved = getResolvedOptions(os.sys.argv, ["JOB_NAME", "CONFIG_PATH"])
+    if getResolvedOptions and _job_name_in(sys.argv[1:]):
+        resolved = getResolvedOptions(sys.argv, ["JOB_NAME", "CONFIG_PATH"])
         return {"config": resolved["CONFIG_PATH"], "mode": "glue"}
 
     parser = argparse.ArgumentParser(description="Load processed Glue data into PostgreSQL RDS")

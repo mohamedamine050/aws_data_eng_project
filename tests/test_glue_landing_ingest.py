@@ -6,6 +6,7 @@ tested is the file a partner would actually send.
 """
 
 import hashlib
+from io import BytesIO
 from pathlib import Path
 
 import pytest
@@ -238,3 +239,31 @@ def test_a_rejected_row_names_every_rule_it_broke(spark):
 def test_every_check_explains_itself():
     for check in landing.BRONZE_CHECKS:
         assert check["description"], check["name"]
+
+
+# ─────────────────────────────────────────────
+# CONFIG LOADING
+#
+# Same defect as the gold job: ``load_config`` referenced an undefined
+# ``LOGGER`` and blew up on the cluster before the first Spark job started.
+# Untested code, so untested failure. Both branches now run.
+# ─────────────────────────────────────────────
+
+def test_load_config_reads_a_local_file(tmp_path):
+    config = tmp_path / "config.json"
+    config.write_text('{"OUTPUT_BUCKET": "demo-bucket"}', encoding="utf-8")
+
+    assert landing.load_config(str(config))["OUTPUT_BUCKET"] == "demo-bucket"
+
+
+def test_load_config_reads_from_s3(monkeypatch):
+    class DummyS3:
+        def get_object(self, Bucket, Key):
+            assert (Bucket, Key) == ("demo", "jobs/landing.json")
+            return {"Body": BytesIO(b'{"LANDING_PREFIX": "landing/partners/"}')}
+
+    monkeypatch.setattr(landing.boto3, "client", lambda service: DummyS3())
+
+    loaded = landing.load_config("s3://demo/jobs/landing.json")
+
+    assert loaded["LANDING_PREFIX"] == "landing/partners/"

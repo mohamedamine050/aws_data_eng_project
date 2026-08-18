@@ -307,7 +307,7 @@ except Exception:  # pragma: no cover
 
 def load_config(path: str, s3: Any = None) -> dict:
     """Read a job's JSON config, from S3 or from disk."""
-    LOGGER.info("Loading config from %s", path)
+    logger.info("Loading config from %s", path)
     if path.startswith("s3://"):
         bucket, _, key = path[len("s3://"):].partition("/")
         s3 = s3 or boto3.client("s3")

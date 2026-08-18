@@ -936,7 +936,8 @@ def write_local_json(file_path: str, data: dict) -> None:
 # PYTHON ENGINE
 # ─────────────────────────────────────────────
 
-def run_job(input_prefix: str = None, output_prefix: str = None, bucket: str = None, local_fs: bool = False) -> dict:
+def run_job(input_prefix: Optional[str] = None, output_prefix: Optional[str] = None,
+            bucket: Optional[str] = None, local_fs: bool = False) -> dict:
     """
     Process e-commerce records with the dependency-free Python engine.
 
