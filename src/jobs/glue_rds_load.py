@@ -13,9 +13,16 @@ not code:
     ]
 
 Dataset names accept both the medallion form and the pre-medallion aliases
-(``processed``, ``curated/orders``). With no ``RDS_TABLES`` block the job falls
-back to the original single-table behaviour (``PROCESSED_S3_PATH`` →
-``RDS_TABLE``), so existing schedules are unaffected.
+(``processed``, ``curated/orders``). Setting ``RDS_TABLE`` instead keeps the
+original single-table behaviour (``PROCESSED_S3_PATH`` → that one table), so
+existing schedules are unaffected. Naming no table at all loads the default
+warehouse layout — the seven tables in ``DEFAULT_TARGETS``.
+
+The RDS connection comes from the config file at ``--CONFIG_PATH`` — one place,
+read once: ``RDS_HOST``, ``RDS_PORT``, ``RDS_DATABASE``, ``RDS_SCHEMA``,
+``RDS_USERNAME``, ``RDS_PASSWORD``, ``RDS_SSLMODE``. Setting ``RDS_SECRET_ARN``
+in that same file moves the credentials to Secrets Manager, which fills in
+whatever the file leaves blank.
 
 Self-contained on purpose: the JDBC and credential handling lives in this file,
 so the Glue job's *Script path* is the whole story.
@@ -402,21 +409,27 @@ def _dataset_path(config: dict, dataset: str) -> str:
 def resolve_targets(config: dict) -> List[Dict[str, Any]]:
     """Build the list of ``{dataset, path, table, mode, required_columns}`` to load.
 
-    Precedence: an explicit ``RDS_TABLES`` list wins; otherwise ``RDS_LOAD_ALL``
-    loads the default warehouse layout; otherwise the legacy single table.
+    Precedence: an explicit ``RDS_TABLES`` list wins; then ``RDS_TABLE``, which
+    is the legacy single-table load; otherwise the default warehouse layout.
+
+    A config that names no table at all used to be an error demanding
+    ``RDS_TABLE``. There is only one layout this pipeline produces, so the
+    absence of any table configuration means "load the lake as designed" rather
+    than "you forgot a legacy key".
     """
     default_mode = config.get("RDS_WRITE_MODE", "append")
 
     if config.get("RDS_TABLES"):
         specs = config["RDS_TABLES"]
-    elif config.get("RDS_LOAD_ALL"):
-        specs = DEFAULT_TARGETS
-    else:
+    elif config.get("RDS_TABLE"):
         specs = [{
             "dataset": "processed",
-            "table": config.get("RDS_TABLE"),
+            "table": config["RDS_TABLE"],
             "required_columns": REQUIRED_COLUMNS,
         }]
+    else:
+        logger.info("No RDS_TABLES/RDS_TABLE in the config — loading the default warehouse layout")
+        specs = DEFAULT_TARGETS
 
     targets = []
     for spec in specs:
@@ -484,14 +497,31 @@ def _resolve_rds_settings(config: dict) -> dict:
         "HOST": "host", "PORT": "port", "DATABASE": "database",
         "USERNAME": "username", "PASSWORD": "password",
     }
-    if not (config.get("RDS_TABLES") or config.get("RDS_LOAD_ALL")):
-        required["TABLE"] = "table"
 
     missing = [f"RDS_{name}" for name, field in required.items() if settings[field] in (None, "")]
     if missing:
-        raise ValueError(f"Missing RDS settings: {missing}")
+        raise ValueError(_missing_settings_message(missing, config))
 
     return settings
+
+
+def _missing_settings_message(missing: List[str], config: dict) -> str:
+    """Say what is missing *and* where it can come from.
+
+    This runs before Spark starts, so it is the whole of what the operator sees
+    in CloudWatch. "Missing RDS settings: [...]" alone sends them reading the
+    script; naming the file and the keys to add to it does not.
+    """
+    as_keys = ", ".join('"{0}": "<value>"'.format(name) for name in missing)
+    where = config.get("CONFIG_PATH") or "the file passed as --CONFIG_PATH"
+
+    return "\n".join([
+        f"Missing RDS settings: {missing}",
+        f"Add them to the job's config file — {where}:",
+        f"  {as_keys}",
+        "Or set RDS_SECRET_ARN in that same file to take the credentials from",
+        "Secrets Manager, which fills in whatever the config file leaves blank.",
+    ])
 
 
 def _build_jdbc_url(settings: dict) -> str:
@@ -593,19 +623,34 @@ def _job_name_in(argv: List[str]) -> bool:
 
 
 def _parse_args() -> dict:
+    """Resolve the job arguments.
+
+    Glue passes exactly two: ``JOB_NAME`` and ``CONFIG_PATH``. Everything the
+    job needs — including the whole RDS connection — is in the file that
+    ``CONFIG_PATH`` points at, so there is nothing else to resolve here.
+    """
     if getResolvedOptions and _job_name_in(sys.argv[1:]):
         resolved = getResolvedOptions(sys.argv, ["JOB_NAME", "CONFIG_PATH"])
-        return {"config": resolved["CONFIG_PATH"], "mode": "glue"}
+        return {
+            "config": resolved["CONFIG_PATH"],
+            "mode": "glue",
+            "job_name": resolved.get("JOB_NAME"),
+        }
 
     parser = argparse.ArgumentParser(description="Load processed Glue data into PostgreSQL RDS")
     parser.add_argument("--config", required=True, help="Path to the Glue config JSON file or s3:// path")
     args = parser.parse_args()
-    return {"config": args.config, "mode": "local"}
+    return {"config": args.config, "mode": "local", "job_name": None}
 
 
 def main() -> None:
     args = _parse_args()
     config = load_config(args["config"])
+
+    if args.get("job_name"):
+        config.setdefault("JOB_NAME", args["job_name"])
+    # Recorded so a validation failure can name the file it read.
+    config.setdefault("CONFIG_PATH", args["config"])
 
     rds_settings = _resolve_rds_settings(config)
     targets = resolve_targets(config)

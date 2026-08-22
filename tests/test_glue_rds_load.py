@@ -358,3 +358,126 @@ def test_the_configured_schema_qualifies_the_target(monkeypatch):
     glue_job._write_to_rds(frame, _writer_settings(schema="analytics"))
 
     assert frame.write.options["dbtable"] == "analytics.fact_events"
+
+
+# ─────────────────────────────────────────────
+# THE SHIPPED CONFIG FILE
+#
+# The connection profile is read from the file the job is handed via
+# ``--CONFIG_PATH``. Nothing tested the file that actually ships, so a missing
+# key there would only surface as a failed job run.
+# ─────────────────────────────────────────────
+
+EXAMPLE_CONFIG = Path(__file__).resolve().parent.parent / "config/glue_rds_load.example.json"
+
+
+def _example() -> dict:
+    return json.loads(EXAMPLE_CONFIG.read_text(encoding="utf-8"))
+
+
+def test_the_example_config_carries_the_whole_connection_block():
+    config = _example()
+
+    for key in ("RDS_HOST", "RDS_PORT", "RDS_DATABASE", "RDS_SCHEMA",
+                "RDS_USERNAME", "RDS_PASSWORD", "RDS_SSLMODE"):
+        assert key in config, f"{key} manquante dans le fichier d'exemple"
+
+
+def test_the_example_config_names_the_blank_the_operator_must_fill():
+    """Everything ships filled except the password, which must not be committed."""
+    with pytest.raises(ValueError) as excinfo:
+        glue_job._resolve_rds_settings(_example())
+
+    message = str(excinfo.value)
+    assert '"RDS_PASSWORD": "<value>"' in message
+    for filled in ("RDS_HOST", "RDS_PORT", "RDS_DATABASE", "RDS_USERNAME"):
+        assert f'"{filled}"' not in message
+
+
+def test_the_example_config_connects_once_the_password_is_filled():
+    config = {**_example(), "RDS_PASSWORD": "s3cret"}
+
+    settings = glue_job._resolve_rds_settings(config)
+
+    assert glue_job._build_jdbc_url(settings) == (
+        f"jdbc:postgresql://{config['RDS_HOST']}:5432/ecommerce?sslmode=require"
+    )
+    assert settings["username"] == "adminuser"
+    assert settings["password"] == "s3cret"
+    assert settings["schema"] == "analytics"
+
+
+def test_the_example_config_needs_no_secrets_manager(monkeypatch):
+    """The direct keys are enough — nothing may reach out to Secrets Manager."""
+    monkeypatch.setattr(glue_job, "_load_secret", lambda arn: pytest.fail("Secrets Manager appelé"))
+
+    config = {**_example(), "RDS_PASSWORD": "s3cret"}
+
+    assert glue_job._resolve_rds_settings(config)["host"] == config["RDS_HOST"]
+
+
+def test_every_example_target_names_a_table_and_resolves_to_a_path():
+    targets = glue_job.resolve_targets(_example())
+
+    assert len(targets) == 7
+    for target in targets:
+        assert target["table"].startswith("analytics.")
+        assert target["path"].startswith("s3://my-data-lake/")
+
+
+# ─────────────────────────────────────────────
+# A CONFIG THAT NAMES NO TABLE
+#
+# This used to fail with "Missing RDS settings: [..., 'RDS_TABLE']" — a key from
+# the pre-medallion single-table days that no current config sets. There is one
+# layout this pipeline produces, so naming nothing loads that.
+# ─────────────────────────────────────────────
+
+def test_naming_no_table_loads_the_default_warehouse_layout():
+    targets = glue_job.resolve_targets({"OUTPUT_BUCKET": "my-lake"})
+
+    assert [target["dataset"] for target in targets] == [
+        spec["dataset"] for spec in glue_job.DEFAULT_TARGETS
+    ]
+    assert targets[0]["table"] == "fact_events"
+
+
+def test_rds_table_still_selects_the_single_table_load():
+    targets = glue_job.resolve_targets({"OUTPUT_BUCKET": "my-lake", "RDS_TABLE": "events"})
+
+    assert len(targets) == 1
+    assert targets[0]["table"] == "events"
+    assert targets[0]["required_columns"] == glue_job.REQUIRED_COLUMNS
+
+
+def test_rds_table_is_no_longer_a_required_setting():
+    """The connection is required; the table name is not."""
+    config = {
+        "OUTPUT_BUCKET": "my-lake",
+        "RDS_HOST": "db.example", "RDS_DATABASE": "warehouse",
+        "RDS_USERNAME": "u", "RDS_PASSWORD": "p",
+    }
+
+    settings = glue_job._resolve_rds_settings(config)
+
+    assert settings["host"] == "db.example"
+    assert settings["table"] is None
+
+
+def test_the_missing_settings_error_names_the_file_and_the_keys():
+    """This message is the whole of what an operator sees in CloudWatch."""
+    with pytest.raises(ValueError) as excinfo:
+        glue_job._resolve_rds_settings({"CONFIG_PATH": "s3://my-lake/config/rds.json"})
+
+    message = str(excinfo.value)
+
+    assert "s3://my-lake/config/rds.json" in message      # the file it read
+    assert '"RDS_HOST": "<value>"' in message             # the key to add to it
+    assert "RDS_SECRET_ARN" in message                    # the alternative
+    assert "RDS_TABLE" not in message
+
+
+def test_the_error_still_reads_without_a_config_path():
+    message = glue_job._missing_settings_message(["RDS_HOST"], {})
+
+    assert "--CONFIG_PATH" in message

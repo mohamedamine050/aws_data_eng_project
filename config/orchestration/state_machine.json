@@ -1,10 +1,10 @@
 {
-  "Comment": "E-commerce medallion pipeline, end to end: it invokes the producer Lambda, then runs the four Glue jobs in dependency order. Replace <ACCOUNT> and the names with your own. The state machine is the only thing that needs scheduling \u2014 see triggers.json.",
+  "Comment": "E-commerce medallion pipeline, end to end: it invokes the producer Lambda, then runs the four Glue jobs in dependency order. Replace <ACCOUNT> and the names with your own. The state machine is the only thing that needs scheduling — see triggers.json.",
   "StartAt": "ProduceEvents",
   "TimeoutSeconds": 10800,
   "States": {
     "ProduceEvents": {
-      "Comment": "Source 1 \u2014 one batch of sessions from the catalog API into SQS. The Lambda does one batch per invocation and returns; the cadence is this state machine's, not a loop inside the function.",
+      "Comment": "Source 1 — one batch of sessions from the catalog API into SQS. The Lambda does one batch per invocation and returns; the cadence is this state machine's, not a loop inside the function.",
       "Type": "Task",
       "Resource": "arn:aws:states:::lambda:invoke",
       "Parameters": {
@@ -43,7 +43,7 @@
       "Next": "IngestPartnerDrops"
     },
     "IngestPartnerDrops": {
-      "Comment": "Job 1 \u2014 source 2. Reads whatever is waiting in landing/partners/, lifts it into v3 records and moves the files aside.",
+      "Comment": "Job 1 — source 2. Reads whatever is waiting in landing/partners/, lifts it into v3 records and moves the files aside.",
       "Type": "Task",
       "Resource": "arn:aws:states:::glue:startJobRun.sync",
       "Parameters": {
@@ -75,7 +75,7 @@
       "Next": "BronzeToSilver"
     },
     "BronzeToSilver": {
-      "Comment": "Job 2 \u2014 clean, type, deduplicate the event stream. FAIL_ON_QUALITY in its config makes a breach of the batch thresholds abort here, which is what keeps gold off a bad partition.",
+      "Comment": "Job 2 — clean, type, deduplicate the event stream. FAIL_ON_QUALITY in its config makes a breach of the batch thresholds abort here, which is what keeps gold off a bad partition.",
       "Type": "Task",
       "Resource": "arn:aws:states:::glue:startJobRun.sync",
       "Parameters": {
@@ -98,7 +98,7 @@
       "Next": "SilverToGold"
     },
     "SilverToGold": {
-      "Comment": "Job 3 \u2014 the six analytical tables.",
+      "Comment": "Job 3 — the six analytical tables.",
       "Type": "Task",
       "Resource": "arn:aws:states:::glue:startJobRun.sync",
       "Parameters": {
@@ -121,7 +121,7 @@
       "Next": "LoadWarehouse"
     },
     "LoadWarehouse": {
-      "Comment": "Job 4 \u2014 publish to PostgreSQL. Last, so BI never sees a half-built day.",
+      "Comment": "Job 4 — publish to PostgreSQL. Last, so BI never sees a half-built day. The whole RDS connection is in the config file at --CONFIG_PATH; the job takes no other argument. Keep the password out of that file with RDS_SECRET_ARN.",
       "Type": "Task",
       "Resource": "arn:aws:states:::glue:startJobRun.sync",
       "Parameters": {

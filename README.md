@@ -265,8 +265,40 @@ revenue anywhere downstream is a plain `SUM`.
 ## PostgreSQL
 
 One database, and it sits at the *end* of the pipeline: the analytical
-warehouse. `RDS_*` credentials come from Secrets Manager, and
-[`glue_rds_load.py`](src/jobs/glue_rds_load.py) is the only file that speaks JDBC.
+warehouse. [`glue_rds_load.py`](src/jobs/glue_rds_load.py) is the only file that
+speaks JDBC.
+
+The connection lives in **one place**: the job's config file, the one Glue hands
+it as `--CONFIG_PATH`. `getResolvedOptions` resolves `JOB_NAME` and `CONFIG_PATH`
+and nothing else — every `RDS_*` setting is read from the file:
+
+```json
+"RDS_HOST": "ecommerce-warehouse.abcdefghijkl.eu-west-3.rds.amazonaws.com",
+"RDS_PORT": "5432",
+"RDS_DATABASE": "ecommerce",
+"RDS_SCHEMA": "analytics",
+"RDS_USERNAME": "adminuser",
+"RDS_PASSWORD": "",
+"RDS_SSLMODE": "require"
+```
+
+which becomes:
+
+```
+jdbc:postgresql://{RDS_HOST}:{RDS_PORT}/{RDS_DATABASE}?sslmode={RDS_SSLMODE}
+```
+
+`RDS_SCHEMA` qualifies any table name that is not already qualified. Anything
+left blank is looked up in Secrets Manager when `RDS_SECRET_ARN` is set in that
+same file — which is how the password stays out of it. A password written into a
+config file on S3 is a password on S3, readable by anything holding
+`s3:GetObject` on the bucket. Fine for local development; use the secret for
+anything else.
+
+Set the whole file up from
+[`config/glue_rds_load.example.json`](config/glue_rds_load.example.json), which
+ships every key with the blanks marked. Missing one is not a mystery: the job
+stops before Spark starts and prints the file it read and the keys to add to it.
 
 ```bash
 psql "$RDS_URL" -f sql/warehouse/001_schema.sql      # 7 tables, indexes, two roles
