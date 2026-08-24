@@ -1,0 +1,29 @@
+name: CD Pipeline
+
+on:
+  push:
+    branches:
+      - main
+    paths-ignore:
+      - '.github/workflows/**'
+      - 'README.md'
+      - 'docs/**'
+  workflow_dispatch:
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout Terraform Repo
+        uses: actions/checkout@v4
+        with:
+          repository: mohamedamine050/terraform-e_commerce-6c91eee4
+          token: ${{ secrets.GH_TOKEN }}
+
+      - name: Checkout Data Repo
+        uses: actions/checkout@v4
+        with:
+          repository: mohamedamine050/aws_data_eng_project
+          token: ${{ secrets.GH_TOKEN }}
+      - name: Deployment placeholder
+        run: echo 'CD Pipeline - No Glue jobs configured'
