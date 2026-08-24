@@ -609,6 +609,27 @@ def list_drops(bucket: str, prefix: str, s3=None) -> List[Dict[str, str]]:
     return drops
 
 
+def sample_keys(bucket: str, prefix: str, s3=None, limit: int = 10) -> List[str]:
+    """A handful of the keys under ``prefix`` — for diagnostics, not for work.
+
+    Never raises: this runs on a path the job is already reporting a problem
+    about, and losing the real message to a listing error would be perverse.
+    """
+    s3 = s3 or boto3.client("s3")
+    keys: List[str] = []
+    try:
+        paginator = s3.get_paginator("list_objects_v2")
+        for page in paginator.paginate(Bucket=bucket, Prefix=prefix):
+            for obj in page.get("Contents", []):
+                if not obj["Key"].endswith("/"):
+                    keys.append(obj["Key"])
+                if len(keys) >= limit:
+                    return keys
+    except Exception as exc:  # noqa: BLE001 - diagnostics must not mask the real error
+        logger.debug("Could not list %s for diagnostics: %s", prefix, exc)
+    return keys
+
+
 def _read_csv(spark: "SparkSession", paths: List[str]) -> "DataFrame":
     """Seam for the tests — every cell read as text, cast on the way out."""
     return (
@@ -752,6 +773,17 @@ def run(config: Dict[str, Any], spark: Any = None, s3: Any = None) -> Dict[str, 
         )
         metrics.count("DropsIngested", 0)
         metrics.flush()
+
+        # Almost always the files are in the bucket, just not in the sub-prefix
+        # the job reads. Show what *is* under landing/ so the log answers the
+        # next question instead of prompting it.
+        nearby = sample_keys(bucket, zone_prefix(config, "landing"), s3=s3)
+        if nearby:
+            message += (
+                "\nFound under s3://{0}/{1} instead: {2}".format(
+                    bucket, zone_prefix(config, "landing"), ", ".join(nearby)
+                )
+            )
 
         if config.get("FAIL_ON_EMPTY_DROP_ZONE"):
             raise ValueError(message)

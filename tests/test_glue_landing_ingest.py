@@ -349,3 +349,44 @@ def test_the_spark_key_matches_the_key_the_lambda_computes(sample):
             f"Spark and Python disagree on {record.get('event_type')} "
             f"@ {record.get('occurred_at')}"
         )
+
+
+def test_an_empty_drop_zone_reports_what_is_in_the_landing_zone(monkeypatch, caplog):
+    """The real incident: the files are in the bucket, one prefix too high.
+
+    ``landing/partner_events.csv`` instead of ``landing/partners/partner_events.csv``
+    reads as "Succeeded, nothing written". The log now names the files it found.
+    """
+    s3 = _S3([
+        {"Key": "landing/partner_events.csv", "Size": 4096},
+        {"Key": "landing/partner_events.ndjson", "Size": 2048},
+    ])
+    monkeypatch.setattr(landing, "list_drops", lambda *a, **kw: [])
+
+    with caplog.at_level("WARNING"):
+        landing.run({"OUTPUT_BUCKET": "lake", "METRICS_ENABLED": False}, spark=None, s3=s3)
+
+    assert "landing/partner_events.csv" in caplog.text
+    assert "Found under s3://lake/landing/" in caplog.text
+
+
+def test_the_diagnostic_listing_never_masks_the_real_problem(monkeypatch, caplog):
+    """A listing failure must not replace the message it was meant to enrich."""
+    class _Broken:
+        def get_paginator(self, name):
+            raise RuntimeError("access denied")
+
+    monkeypatch.setattr(landing, "list_drops", lambda *a, **kw: [])
+
+    with caplog.at_level("WARNING"):
+        result = landing.run({"OUTPUT_BUCKET": "lake", "METRICS_ENABLED": False},
+                             spark=None, s3=_Broken())
+
+    assert result["files"] == 0
+    assert "No file to ingest in s3://lake/landing/partners/" in caplog.text
+
+
+def test_sample_keys_stops_at_the_limit():
+    s3 = _S3([{"Key": f"landing/f{i}.csv", "Size": 10} for i in range(30)])
+
+    assert len(landing.sample_keys("lake", "landing/", s3=s3, limit=4)) == 4
