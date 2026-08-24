@@ -648,7 +648,9 @@ def main() -> None:
     config = load_config(args["config"])
 
     if args.get("job_name"):
-        config.setdefault("JOB_NAME", args["job_name"])
+        # The Glue argument wins: it is the job's real identity, and one
+        # shared config file must not make all four jobs report the same name.
+        config["JOB_NAME"] = args["job_name"]
     # Recorded so a validation failure can name the file it read.
     config.setdefault("CONFIG_PATH", args["config"])
 

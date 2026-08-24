@@ -848,7 +848,10 @@ def run(config: Dict[str, Any], spark: Any = None, s3: Any = None) -> Dict[str, 
 def main(argv=None) -> Dict[str, Any]:
     args = getResolvedOptions(argv if argv is not None else sys.argv, ["JOB_NAME", "CONFIG_PATH"])
     config = load_config(args["CONFIG_PATH"])
-    config.setdefault("JOB_NAME", args.get("JOB_NAME"))
+    # The Glue argument wins: it is the job's real identity, and one shared
+    # config file must not make all four jobs report the same name.
+    if args.get("JOB_NAME"):
+        config["JOB_NAME"] = args["JOB_NAME"]
     return run(config)
 
 

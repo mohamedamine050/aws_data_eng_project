@@ -129,3 +129,56 @@ def test_rds_main_runs_end_to_end_over_stubs(config_file, monkeypatch, capsys):
     assert summary["status"] == "success"
     assert summary["mode"] == "glue"
     assert summary["rows_loaded"] == 42
+
+
+# ─────────────────────────────────────────────
+# ONE CONFIG FILE, FOUR JOBS
+# ─────────────────────────────────────────────
+
+@pytest.mark.parametrize(
+    ("module", "runner"),
+    [(landing, "run"), (gold, "run"), (bronze_silver, "run_spark_job")],
+    ids=["landing_ingest", "silver_to_gold", "bronze_to_silver"],
+)
+def test_the_glue_argument_wins_over_a_job_name_in_the_config(module, runner, tmp_path, monkeypatch):
+    """The four jobs share one config file, so the file must not name the job.
+
+    It used to be ``setdefault``, meaning a JOB_NAME in the config beat the one
+    Glue passed — and all four jobs reported their metrics under a single name.
+    """
+    path = tmp_path / "pipeline.json"
+    path.write_text(json.dumps({**CONFIG, "JOB_NAME": "whatever-the-file-says"}), encoding="utf-8")
+
+    captured = {}
+    monkeypatch.setattr(module, "getResolvedOptions", _resolver(str(path), job_name="the-real-job"))
+    monkeypatch.setattr(module, runner, lambda config, *a, **k: captured.update(config) or {})
+
+    module.main(["prog"])
+
+    assert captured["JOB_NAME"] == "the-real-job"
+
+
+def test_the_warehouse_load_takes_its_name_from_glue_too(tmp_path, monkeypatch, capsys):
+    path = tmp_path / "pipeline.json"
+    path.write_text(json.dumps({**CONFIG, "JOB_NAME": "whatever-the-file-says"}), encoding="utf-8")
+
+    captured = {}
+
+    class DummyBuilder:
+        def appName(self, name):
+            return self
+
+        def getOrCreate(self):
+            return "spark"
+
+    monkeypatch.setattr(rds, "getResolvedOptions", _resolver(str(path), job_name="the-real-job"))
+    monkeypatch.setattr(rds.sys, "argv", ["prog", "--JOB_NAME", "the-real-job", "--CONFIG_PATH", str(path)])
+    monkeypatch.setattr(rds, "SparkSession", type("S", (), {"builder": DummyBuilder()}))
+    monkeypatch.setattr(rds, "_resolve_rds_settings", lambda cfg: captured.update(cfg) or {"url": "x"})
+    monkeypatch.setattr(rds, "resolve_targets", lambda cfg: [])
+    monkeypatch.setattr(rds, "load_targets", lambda spark, targets, settings: [])
+
+    rds.main()
+    capsys.readouterr()
+
+    assert captured["JOB_NAME"] == "the-real-job"

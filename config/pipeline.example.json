@@ -1,0 +1,106 @@
+{
+  "_comment": [
+    "UN SEUL fichier de config pour les quatre jobs Glue. Chaque job lit les",
+    "clés qui le concernent et ignore les autres — les préfixes RDS_/LANDING_/",
+    "GOLD_ ne se chevauchent pas.",
+    "",
+    "Déposez-le sur S3 et passez-le à chaque job :",
+    "  --CONFIG_PATH s3://<votre-bucket-config>/pipeline.json",
+    "",
+    "Ne mettez PAS JOB_NAME ici : Glue passe --JOB_NAME à chaque exécution, et",
+    "c'est lui qui nomme les métriques. Le fixer ici ferait signer les quatre",
+    "jobs du même nom.",
+    "",
+    "Ne passez PAS --extra-py-files / --DEPS_PATH : chaque script Glue est",
+    "autonome. Un dependencies.zip contenant boto3 écrase la version native de",
+    "Glue et provoque 'DataNotFoundError: Unable to load data for: endpoints'."
+  ],
+
+  "_lac": "Le seul réglage vraiment obligatoire. Tout le reste a un défaut sensé.",
+  "OUTPUT_BUCKET": "data-lake-abjx4fbmp43a8f6o",
+  "ENVIRONMENT": "dev",
+
+  "_zones": [
+    "Les préfixes de la mise en page médaillon. Laissez-les tels quels sauf si",
+    "votre lac utilise d'autres noms. Chemin final = OUTPUT_BUCKET + préfixe de",
+    "zone + nom du jeu de données, ex. bronze/ + events/."
+  ],
+  "LANDING_PREFIX": "landing/",
+  "BRONZE_PREFIX": "bronze/",
+  "SILVER_PREFIX": "silver/",
+  "GOLD_PREFIX": "gold/",
+  "QUARANTINE_PREFIX": "quarantine/",
+  "QUALITY_PREFIX": "quality/",
+
+  "_metriques": "Compteurs custom CloudWatch, un espace de noms pour les quatre jobs.",
+  "METRICS_ENABLED": true,
+  "METRICS_NAMESPACE": "Ecommerce/Pipeline",
+
+  "_job1": [
+    "glue_landing_ingest — landing/partners/ -> bronze/events/",
+    "Les partenaires déposent dans LANDING_PREFIX + LANDING_INGEST_SUBPATH,",
+    "soit landing/partners/. Extensions lues : .csv .json .ndjson .jsonl.",
+    "Les fichiers traités sont déplacés vers landing/_processed/ pour que la",
+    "run suivante ne les relise pas."
+  ],
+  "LANDING_INGEST_SUBPATH": "partners/",
+  "LANDING_ARCHIVE_SUBPATH": "_processed/",
+  "ARCHIVE_PROCESSED": true,
+  "CHANNEL": "web",
+  "FAIL_ON_EMPTY_DROP_ZONE": false,
+
+  "_job2": [
+    "glue_bronze_to_silver — bronze/events/ -> silver/events/ + quality/",
+    "WRITE_MODE overwrite réécrit les partitions traitées ; COALESCE limite le",
+    "nombre de fichiers de sortie (des milliers de petits fichiers rendent",
+    "Athena lent et cher). QUALITY fixe les seuils du rapport de qualité."
+  ],
+  "WRITE_MODE": "overwrite",
+  "COALESCE": 4,
+  "FAIL_ON_EMPTY_BRONZE": false,
+  "FAIL_ON_QUALITY": false,
+  "QUALITY": {
+    "min_retention_pct": 95.0,
+    "max_null_customer_pct": 40.0
+  },
+
+  "_job3": [
+    "glue_silver_to_gold — silver/events/ -> gold/*",
+    "GOLD_DATASETS absent = les six tables. Une liste explicite n'en",
+    "reconstruit qu'une partie ; une liste vide n'en construit aucune."
+  ],
+  "ANOMALY_AMOUNT_THRESHOLD": 5000.0,
+  "PRODUCT_DAILY_TOP_N": 0,
+
+  "_job4": [
+    "glue_rds_load — silver + gold -> PostgreSQL",
+    "Les tables doivent exister avant le chargement :",
+    "  psql \"$RDS_URL\" -f sql/warehouse/001_schema.sql",
+    "Sans RDS_TABLES ni RDS_TABLE, les sept tables standard sont chargées.",
+    "",
+    "RDS_PASSWORD vide et RDS_SECRET_ARN posé = les identifiants viennent de",
+    "Secrets Manager. Un mot de passe écrit ici est lisible par tout ce qui a",
+    "s3:GetObject sur le bucket de config."
+  ],
+  "RDS_HOST": "",
+  "RDS_PORT": "5432",
+  "RDS_DATABASE": "ecommerce",
+  "RDS_SCHEMA": "analytics",
+  "RDS_USERNAME": "adminuser",
+  "RDS_PASSWORD": "",
+  "RDS_SSLMODE": "require",
+  "RDS_SECRET_ARN": "",
+  "RDS_WRITE_MODE": "append",
+  "RDS_BATCH_SIZE": 10000,
+  "RDS_NUM_PARTITIONS": 8,
+  "RDS_TRUNCATE": true,
+  "RDS_TABLES": [
+    { "dataset": "silver/events",     "table": "analytics.fact_events",       "mode": "append" },
+    { "dataset": "gold/sessions",     "table": "analytics.fact_sessions",     "mode": "overwrite" },
+    { "dataset": "gold/funnel_daily", "table": "analytics.agg_funnel_daily",  "mode": "overwrite" },
+    { "dataset": "gold/orders",       "table": "analytics.fact_orders",       "mode": "overwrite" },
+    { "dataset": "gold/customer_rfm", "table": "analytics.dim_customer_rfm",  "mode": "overwrite" },
+    { "dataset": "gold/product_daily","table": "analytics.agg_product_daily", "mode": "overwrite" },
+    { "dataset": "gold/anomalies",    "table": "analytics.fact_anomalies",    "mode": "overwrite" }
+  ]
+}

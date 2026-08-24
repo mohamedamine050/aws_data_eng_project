@@ -481,8 +481,14 @@ aws s3 cp data/catalog/ s3://$OUTPUT_BUCKET/catalog/ --recursive
 aws s3 cp data/landing/partner_events.csv s3://$OUTPUT_BUCKET/landing/partners/
 ```
 
-The second line *is* source ②: the `ObjectCreated` notification wakes the
-landing Lambda, which expands the file and writes it to `bronze/events/`.
+The second line *is* source ②. Mind the `partners/` — `glue_landing_ingest`
+reads `landing/partners/`, not `landing/`, and a file one prefix too high makes
+the job report *Succeeded* having written nothing.
+
+**Deploying it for real**: [`docs/DEPLOIEMENT.md`](docs/DEPLOIEMENT.md) — the
+order the four jobs must run in, the single config file they share, what to
+check between each one, and how to read a run that succeeded without producing
+anything.
 
 ---
 

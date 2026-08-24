@@ -367,6 +367,69 @@ FUNNEL_STAGES = ["product_viewed", "add_to_cart", "checkout_started", "order_pla
 # READ
 # ─────────────────────────────────────────────
 
+#: How Spark reports a prefix that no job has written to yet. Matched on the
+#: message because the exception class differs between Spark builds.
+_MISSING_PATH_MARKERS = ("PATH_NOT_FOUND", "Path does not exist", "does not exist")
+
+
+def _is_missing_path(exc: Exception) -> bool:
+    return any(marker in str(exc) for marker in _MISSING_PATH_MARKERS)
+
+
+def _has_objects(s3_uri: str, client=None) -> bool:
+    """Does anything exist under this ``s3://`` prefix?
+
+    Asked before Spark reads, because ``spark.read`` is lazy: the missing path
+    can surface at the read, at the first count, or at the write, and only one
+    of those is inside a try block anyone thought to write.
+    """
+    if not s3_uri.startswith("s3://"):
+        return True  # a local path in the tests — let Spark decide
+
+    bucket, _, prefix = s3_uri[len("s3://"):].partition("/")
+    client = client or s3
+    try:
+        response = client.list_objects_v2(Bucket=bucket, Prefix=prefix, MaxKeys=1)
+    except Exception as exc:  # noqa: BLE001 - a listing failure is not an empty lake
+        logger.warning("Could not check %s (%s) — letting Spark try", s3_uri, exc)
+        return True
+    return response.get("KeyCount", 0) > 0
+
+
+def _nothing_to_process(config: dict, paths: dict, metrics, started, detail: str) -> dict:
+    """Bronze has never been written to — say so instead of raising Spark's error.
+
+    ``[PATH_NOT_FOUND] Path does not exist: s3://…/bronze/events`` is true but
+    unhelpful: the fault is upstream, in the job or the Lambda that should have
+    filled bronze. Name that, and let the config decide whether an empty lake
+    stops the chain.
+    """
+    message = (
+        f"Nothing to process: {paths['bronze_events']} does not exist yet, so "
+        f"{paths['silver_events']} was not written. Bronze is filled by the "
+        f"glue_landing_ingest job (partner files) and by the stream_processor "
+        f"Lambda (the queue) — check that one of them has run and actually wrote "
+        f"records. Underlying error: {detail}"
+    )
+
+    metrics.count("RecordsProcessed", 0)
+    metrics.flush()
+
+    if config.get("FAIL_ON_EMPTY_BRONZE"):
+        raise ValueError(message)
+
+    logger.warning(message)
+    return {
+        "status": "success",
+        "records": 0,
+        "reason": "bronze is empty",
+        "bronze_path": paths["bronze_events"],
+        "outputs": {},
+        "row_counts": {"processed": 0},
+        "duration_seconds": round((datetime.now(timezone.utc) - started).total_seconds(), 2),
+    }
+
+
 def read_raw(spark: SparkSession, path: str, schema: Optional["StructType"] = None) -> DataFrame:
     """Read the NDJSON raw zone.
 
@@ -1076,7 +1139,15 @@ def run_spark_job(config: dict, spark=None) -> dict:
     spark = spark or SparkSession.builder.appName(config.get("JOB_NAME", "ecommerce-processing")).getOrCreate()
 
     logger.info("Reading bronze events from %s", paths["bronze_events"])
-    raw = read_raw(spark, paths["bronze_events"])
+    if not _has_objects(paths["bronze_events"]):
+        return _nothing_to_process(config, paths, metrics, started, "the prefix holds no object")
+
+    try:
+        raw = read_raw(spark, paths["bronze_events"])
+    except Exception as exc:  # noqa: BLE001 - only the missing-path case is absorbed
+        if not _is_missing_path(exc):
+            raise
+        return _nothing_to_process(config, paths, metrics, started, str(exc))
 
     process_date = config.get("PROCESS_DATE")
     processed = to_processed(raw)
@@ -1207,7 +1278,10 @@ def main(argv=None) -> dict:
 
     config_path = args["CONFIG_PATH"]
     config = load_config(config_path)
-    config.setdefault("JOB_NAME", args.get("JOB_NAME"))
+    # The Glue argument wins: it is the job's real identity, and one shared
+    # config file must not make all four jobs report the same name.
+    if args.get("JOB_NAME"):
+        config["JOB_NAME"] = args["JOB_NAME"]
 
     engine = config.get("ENGINE", "spark")
     bucket = config.get("OUTPUT_BUCKET")
