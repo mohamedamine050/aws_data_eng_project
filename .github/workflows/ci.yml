@@ -89,7 +89,7 @@ jobs:
       - name: Checkout Terraform Repo
         uses: actions/checkout@v4
         with:
-          repository: mohamedamine050/terraform-e_commerce-6c91eee4
+          repository: mohamedamine050/terraform-e-commerce-a28ba93f
           token: ${{ secrets.GH_TOKEN }}
 
       - name: Configure AWS Credentials
