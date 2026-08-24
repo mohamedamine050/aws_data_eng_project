@@ -126,7 +126,65 @@ def test_an_empty_drop_zone_costs_no_cluster(monkeypatch):
 
     result = landing.run({"OUTPUT_BUCKET": "lake", "METRICS_ENABLED": False}, spark=None, s3=_S3())
 
-    assert result == {"status": "success", "files": 0, "records": 0, "rejected": 0, "archived": 0}
+    assert result == {
+        "status": "success",
+        "files": 0, "records": 0, "rejected": 0, "archived": 0,
+        "reason": "empty drop zone",
+        "drop_zone": "s3://lake/landing/partners/",
+    }
+
+
+def test_an_empty_run_says_where_it_looked(monkeypatch, caplog):
+    """A run that writes nothing must not look like one that worked.
+
+    This is the shape of a real incident: the job reports Succeeded in a minute
+    and bronze stays empty, because the files went somewhere the job does not
+    read.
+    """
+    monkeypatch.setattr(landing, "list_drops", lambda *a, **kw: [])
+
+    with caplog.at_level("WARNING"):
+        landing.run({"OUTPUT_BUCKET": "lake", "METRICS_ENABLED": False}, spark=None, s3=_S3())
+
+    assert "s3://lake/landing/partners/" in caplog.text     # where it looked
+    assert "s3://lake/bronze/events/" in caplog.text        # what stayed empty
+    assert "OUTPUT_BUCKET" in caplog.text                   # what to check
+    assert "s3://lake/landing/_processed/" in caplog.text   # where ingested files went
+
+
+def test_an_empty_drop_zone_can_be_made_fatal(monkeypatch):
+    """For a pipeline that must never run on nothing."""
+    monkeypatch.setattr(landing, "list_drops", lambda *a, **kw: [])
+
+    config = {"OUTPUT_BUCKET": "lake", "METRICS_ENABLED": False, "FAIL_ON_EMPTY_DROP_ZONE": True}
+
+    with pytest.raises(ValueError, match="No file to ingest"):
+        landing.run(config, spark=None, s3=_S3())
+
+
+def test_list_drops_counts_what_it_ignored(caplog):
+    """Eleven files with the wrong extension is not the same as an empty zone."""
+    class _Paginator:
+        def paginate(self, Bucket, Prefix):
+            return [{"Contents": [
+                {"Key": "landing/partners/events.csv", "Size": 120},
+                {"Key": "landing/partners/events.ndjson", "Size": 90},
+                {"Key": "landing/partners/notes.txt", "Size": 10},
+                {"Key": "landing/partners/export", "Size": 40},
+                {"Key": "landing/partners/empty.csv", "Size": 0},
+                {"Key": "landing/partners/", "Size": 0},
+            ]}]
+
+    class _Client:
+        def get_paginator(self, name):
+            return _Paginator()
+
+    with caplog.at_level("INFO"):
+        drops = landing.list_drops("lake", "landing/partners/", s3=_Client())
+
+    assert [drop["format"] for drop in drops] == ["csv", "json"]
+    assert "2 to ingest, 2 ignored (extension), 1 empty" in caplog.text
+    assert "notes.txt" in caplog.text
 
 
 # ─────────────────────────────────────────────
@@ -267,3 +325,27 @@ def test_load_config_reads_from_s3(monkeypatch):
     loaded = landing.load_config("s3://demo/jobs/landing.json")
 
     assert loaded["LANDING_PREFIX"] == "landing/partners/"
+
+
+def test_the_spark_key_matches_the_key_the_lambda_computes(sample):
+    """The two sources must agree on what "the same event" means.
+
+    Source 1 hashes in Python, inside the Lambda; source 2 hashes in Spark,
+    inside this job. If the two formulas drift apart, the same event arriving
+    twice gets two keys, the silver dedupe stops collapsing it, and nothing
+    fails — the warehouse just quietly double-counts.
+
+    The test above pins the Spark expression to a formula written out by hand;
+    this one pins it to the function the Lambda actually calls.
+    """
+    from common.ecommerce_schema import idempotency_key
+
+    rows = sample.limit(25).collect()
+    assert rows, "the sample export is empty"
+
+    for row in rows:
+        record = row.asDict(recursive=True)
+        assert row["idempotency_key"] == idempotency_key(record), (
+            f"Spark and Python disagree on {record.get('event_type')} "
+            f"@ {record.get('occurred_at')}"
+        )

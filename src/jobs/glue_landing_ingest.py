@@ -571,15 +571,25 @@ def add_identity(df: "DataFrame", source_object: str = "landing") -> "DataFrame"
 # ─────────────────────────────────────────────
 
 def list_drops(bucket: str, prefix: str, s3=None) -> List[Dict[str, str]]:
-    """The files waiting in the drop zone, classified by how to read them."""
+    """The files waiting in the drop zone, classified by how to read them.
+
+    Logs what it saw, not only what it kept. "Nothing to ingest" and "eleven
+    files, none with an extension I read" look identical from bronze, and the
+    second one is a mistake somebody needs to see.
+    """
     s3 = s3 or boto3.client("s3")
     drops = []
+    ignored: List[str] = []
+    empty = 0
 
     paginator = s3.get_paginator("list_objects_v2")
     for page in paginator.paginate(Bucket=bucket, Prefix=prefix):
         for obj in page.get("Contents", []):
             key = obj["Key"]
-            if key.endswith("/") or obj.get("Size", 0) == 0:
+            if key.endswith("/"):
+                continue
+            if obj.get("Size", 0) == 0:
+                empty += 1
                 continue
             lowered = key.lower()
             if lowered.endswith(".csv"):
@@ -587,7 +597,14 @@ def list_drops(bucket: str, prefix: str, s3=None) -> List[Dict[str, str]]:
             elif lowered.endswith((".json", ".ndjson", ".jsonl")):
                 drops.append({"key": key, "format": "json"})
             else:
-                logger.warning("Ignoring %s: unsupported extension", key)
+                ignored.append(key)
+
+    logger.info(
+        "Drop zone s3://%s/%s — %d to ingest, %d ignored (extension), %d empty",
+        bucket, prefix, len(drops), len(ignored), empty,
+    )
+    for key in ignored[:20]:
+        logger.warning("Ignoring %s: extension is not .csv/.json/.ndjson/.jsonl", key)
 
     return drops
 
@@ -723,10 +740,29 @@ def run(config: Dict[str, Any], spark: Any = None, s3: Any = None) -> Dict[str, 
     drops = list_drops(bucket, ingest_prefix(config), s3=s3)
 
     if not drops:
-        logger.info("Nothing waiting in s3://%s/%s", bucket, ingest_prefix(config))
+        # A run that ingests nothing and reports success is indistinguishable
+        # from one that worked — which is how an empty bronze zone goes
+        # unnoticed. Say where it looked, and let the config make it fatal.
+        location = f"s3://{bucket}/{ingest_prefix(config)}"
+        message = (
+            f"No file to ingest in {location} — nothing was written to "
+            f"{paths['bronze_events']}. Upload .csv/.json/.ndjson/.jsonl files there, "
+            f"and check OUTPUT_BUCKET and LANDING_INGEST_SUBPATH in the job config. "
+            f"Already-ingested files are moved to s3://{bucket}/{archive_prefix(config)}."
+        )
         metrics.count("DropsIngested", 0)
         metrics.flush()
-        return {"status": "success", "files": 0, "records": 0, "rejected": 0, "archived": 0}
+
+        if config.get("FAIL_ON_EMPTY_DROP_ZONE"):
+            raise ValueError(message)
+
+        logger.warning(message)
+        return {
+            "status": "success",
+            "files": 0, "records": 0, "rejected": 0, "archived": 0,
+            "reason": "empty drop zone",
+            "drop_zone": location,
+        }
 
     if spark is None:
         from pyspark.sql import SparkSession
