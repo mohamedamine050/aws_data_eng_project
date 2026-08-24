@@ -215,6 +215,22 @@ def resolve_gold_datasets(config: dict) -> List[str]:
 # METRICS
 # ─────────────────────────────────────────────
 
+def as_bool(value: Any, default: bool = False) -> bool:
+    """Read a boolean that may have arrived as a string.
+
+    A config file written by Terraform, or built from environment variables,
+    carries ``"true"`` and ``"false"`` as strings — and ``bool("false")`` is
+    ``True``, which silently turns a kill switch into an on switch. Anything
+    that is already a bool passes through.
+    """
+    if value is None:
+        return default
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, (int, float)):
+        return bool(value)
+    return str(value).strip().lower() not in ("", "false", "0", "no", "off", "none")
+
 class JobMetrics:
     """CloudWatch counters for this job.
 
@@ -245,7 +261,7 @@ class JobMetrics:
         return cls(
             namespace=config.get("METRICS_NAMESPACE", "Ecommerce/Pipeline"),
             dimensions=dimensions,
-            enabled=config.get("METRICS_ENABLED", env_default),
+            enabled=as_bool(config.get("METRICS_ENABLED"), env_default),
             client=client,
         )
 
