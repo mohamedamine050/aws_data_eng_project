@@ -79,11 +79,15 @@ def test_detect_source_direct(processor):
     assert processor.detect_source({"event_type": "product_viewed"}) == "direct"
 
 
-def test_detect_source_of_an_empty_records_list_is_direct(processor):
-    assert processor.detect_source({"Records": []}) == "direct"
+def test_detect_source_of_an_empty_records_list_is_still_sqs(processor):
+    """Une file vide reste une invocation SQS.
 
-
-# ── S3 BATCH ON-RAMP ─────────────────────────────────────────
+    Ce test affirmait l'inverse — il documentait le code plutot que le
+    comportement voulu. Classee "direct", l'enveloppe elle-meme devenait un
+    enregistrement, echouait la validation, et partait en quarantaine : du
+    dechet ecrit par un lot qui ne contenait rien.
+    """
+    assert processor.detect_source({"Records": []}) == "sqs"
 
 
 # ── PARTITIONED WRITES ───────────────────────────────────────

@@ -1,13 +1,14 @@
 """Landing-zone Lambda — sources 1 and 2 -> ``bronze/events`` + ``quarantine/events``.
 
-Four invocation modes, auto-detected from the event shape:
+Three invocation modes, auto-detected from the event shape:
 
-1. **SQS** event source mapping — ``Records[]`` with a ``body``
-2. **S3 ObjectCreated** — ``Records[]`` with an ``s3`` block: a batch file
-   (NDJSON / JSON array / CSV) dropped in a landing prefix is fanned out into
-   individual events. This is the batch on-ramp next to the streaming one.
-3. **Step Functions** — ``messages[]``
-4. **Direct invoke** — a single event object
+1. **SQS** event source mapping — ``Records[]`` with a ``body``. The normal one.
+2. **Step Functions** — ``messages[]``
+3. **Direct invoke** — a single event object, for a manual replay
+
+Partner *files* are not this function's job: they are a batch that can outgrow a
+15-minute function, so ``glue_landing_ingest`` reads them straight from
+``landing/partners/``.
 
 Every record is run through the shared quality rules
 (:mod:`common.quality`). Records that pass land in
@@ -108,9 +109,15 @@ def _validate(event: Dict[str, Any]) -> None:
 # ─────────────────────────────────────────────
 
 def detect_source(event: Dict[str, Any]) -> str:
-    """Identify the invocation mode from the event shape."""
-    records = (event or {}).get("Records")
-    if isinstance(records, list) and records:
+    """Identify the invocation mode from the event shape.
+
+    An empty ``Records`` list is still an SQS invocation. Treating it as a
+    direct invoke turns the envelope itself into a record, which then fails
+    validation and lands in the quarantine zone — junk written by a batch that
+    contained nothing at all. The ``messages`` branch below already accepted an
+    empty list; this one has to as well.
+    """
+    if isinstance((event or {}).get("Records"), list):
         return "sqs"
     if isinstance((event or {}).get("messages"), list):
         return "stepfunctions"

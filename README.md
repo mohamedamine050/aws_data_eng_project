@@ -485,6 +485,10 @@ The second line *is* source ②. Mind the `partners/` — `glue_landing_ingest`
 reads `landing/partners/`, not `landing/`, and a file one prefix too high makes
 the job report *Succeeded* having written nothing.
 
+**What each piece does**: [`docs/COMPOSANTS.md`](docs/COMPOSANTS.md) — the two
+Lambdas and the four Glue jobs, what each one reads and writes, and which S3
+zone is filled by whom.
+
 **Deploying it for real**: [`docs/DEPLOIEMENT.md`](docs/DEPLOIEMENT.md) — the
 order the four jobs must run in, the single config file they share, what to
 check between each one, and how to read a run that succeeded without producing

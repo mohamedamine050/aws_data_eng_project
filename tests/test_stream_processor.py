@@ -194,3 +194,44 @@ def test_handler_reports_failure_on_s3_error(processor, monkeypatch, tmp_path):
 
     result = processor.handler(event, None)
     assert result["batchItemFailures"] == [{"itemIdentifier": "42"}]
+
+
+# ─────────────────────────────────────────────
+# UN LOT VIDE N'EST PAS UN INVOKE DIRECT
+#
+# ``{"Records": []}`` est une invocation SQS legitime. Classee "direct", elle
+# faisait de l'enveloppe elle-meme un enregistrement, qui echouait la validation
+# et partait en quarantaine : du dechet ecrit par un lot qui ne contenait rien.
+# ─────────────────────────────────────────────
+
+def test_an_empty_sqs_batch_is_still_an_sqs_batch(processor):
+    assert processor.detect_source({"Records": []}) == "sqs"
+
+
+def test_an_empty_sqs_batch_collects_nothing(processor):
+    event = {"Records": [], "CONFIG_PATH": "s3://bucket/config.json"}
+
+    assert processor.collect_records(event, processor.detect_source(event)) == []
+
+
+def test_the_envelope_never_becomes_a_record(processor):
+    """Le symptome : une cle de config finissait en quarantaine comme un evenement."""
+    event = {"Records": [], "CONFIG_PATH": "s3://bucket/config.json"}
+    source = processor.detect_source(event)
+
+    for _item_id, record in processor.collect_records(event, source):
+        assert "CONFIG_PATH" not in record
+
+
+def test_a_real_direct_invoke_still_works(processor):
+    event = {"event_type": "product_viewed", "occurred_at": "2026-06-24T12:00:00+00:00"}
+
+    assert processor.detect_source(event) == "direct"
+    assert len(processor.collect_records(event, "direct")) == 1
+
+
+def test_a_populated_sqs_batch_is_unaffected(processor):
+    event = {"Records": [{"messageId": "m1", "body": "{}"}]}
+
+    assert processor.detect_source(event) == "sqs"
+    assert len(processor.collect_records(event, "sqs")) == 1
