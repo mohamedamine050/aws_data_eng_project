@@ -8,12 +8,19 @@ jobs:
     runs-on: ubuntu-latest
 
     steps:
+      # ============================================
+      # CHECKOUT TERRAFORM REPOSITORY
+      # ============================================
       - name: Checkout Terraform Repo
         uses: actions/checkout@v4
         with:
-          repository: mohamedamine050/terraform_e_coe-3b5480df
+          repository: mohamedamine050/terraform-e_coe-3b5480df
           token: ${{ secrets.GH_TOKEN }}
+          fetch-depth: 1
 
+      # ============================================
+      # AWS CREDENTIALS
+      # ============================================
       - name: Configure AWS Credentials
         uses: aws-actions/configure-aws-credentials@v4
         with:
@@ -21,11 +28,14 @@ jobs:
           aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
           aws-region: ${{ secrets.AWS_REGION }}
 
+      # ============================================
+      # TERRAFORM
+      # ============================================
       - name: Setup Terraform
         uses: hashicorp/setup-terraform@v3
 
       # ============================================
-      # DESTROY INFRASTRUCTURE
+      # DESTROY INFRA
       # ============================================
       - name: Terraform Init - Infra
         working-directory: infra
@@ -46,6 +56,9 @@ jobs:
         working-directory: bootstrap
         run: terraform destroy -auto-approve
 
+      # ============================================
+      # FINISH
+      # ============================================
       - name: Destroy completed
         run: |
           echo "======================================"
