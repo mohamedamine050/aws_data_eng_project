@@ -446,6 +446,84 @@ def _nothing_to_process(config: dict, paths: dict, metrics, started, detail: str
     }
 
 
+def _read_nothing(config: dict, paths: dict, metrics, started, raw_count: int) -> dict:
+    """Bronze holds objects, but not one readable event.
+
+    Always a shape mismatch. PERMISSIVE mode turns it into empty or all-NULL
+    rows rather than an error — the right call for one bad line, a silent
+    disaster for a whole prefix. Measured on Spark 4, from the same file:
+
+        NDJSON, one event per line   -> N rows, N usable   (the contract)
+        JSON array on a single line  -> N rows, N usable   (tolerated)
+        pretty-printed JSON          -> one row per LINE, none usable
+        CSV                          -> rows, none usable
+        anything else                -> rows, none usable
+
+    So a non-zero row count proves nothing; only a non-NULL ``event_type`` does.
+    """
+    seen = (
+        "the prefix holds no readable object"
+        if raw_count == 0
+        else f"the prefix parsed into {raw_count} row(s), none of which carry an event_type"
+    )
+    message = "\n".join([
+        f"No usable event in {paths['bronze_events']} — {seen}, so "
+        f"{paths['silver_events']} was not written.",
+        "Bronze must be NDJSON: one complete JSON event per line, with the nested "
+        "product/session/customer blocks. Pretty-printed JSON gives one row per line "
+        "of formatting; CSV and Parquet give rows with every field NULL. None of them "
+        "raise an error.",
+        f"Check with: aws s3 ls {paths['bronze_events']} --recursive, then download one "
+        "object and confirm its first line is a complete JSON event.",
+    ])
+    metrics.count("RecordsProcessed", 0)
+    metrics.flush()
+
+    if as_bool(config.get("FAIL_ON_EMPTY_BRONZE")):
+        raise ValueError(message)
+
+    logger.warning(message)
+    return {
+        "status": "success",
+        "records": 0,
+        "reason": "bronze parsed to zero rows",
+        "bronze_path": paths["bronze_events"],
+        "outputs": {},
+        "row_counts": {"raw": 0, "processed": 0},
+        "duration_seconds": round((datetime.now(timezone.utc) - started).total_seconds(), 2),
+    }
+
+
+def _kept_nothing(config: dict, paths: dict, metrics, started, raw_count: int, process_date) -> dict:
+    """Rows were read, none survived. Name the filter that ate them."""
+    cause = (
+        f"PROCESS_DATE={process_date} matched none of them"
+        if process_date
+        else "they were all dropped by cleaning or deduplication"
+    )
+    message = (
+        f"Read {raw_count} row(s) from {paths['bronze_events']} but kept 0: {cause}. "
+        f"{paths['silver_events']} was not written."
+    )
+    metrics.count("RecordsRead", raw_count)
+    metrics.count("RecordsProcessed", 0)
+    metrics.flush()
+
+    if as_bool(config.get("FAIL_ON_EMPTY_BRONZE")):
+        raise ValueError(message)
+
+    logger.warning(message)
+    return {
+        "status": "success",
+        "records": 0,
+        "reason": "nothing survived processing",
+        "bronze_path": paths["bronze_events"],
+        "outputs": {},
+        "row_counts": {"raw": raw_count, "processed": 0},
+        "duration_seconds": round((datetime.now(timezone.utc) - started).total_seconds(), 2),
+    }
+
+
 def read_raw(spark: SparkSession, path: str, schema: Optional["StructType"] = None) -> DataFrame:
     """Read the NDJSON raw zone.
 
@@ -1165,6 +1243,27 @@ def run_spark_job(config: dict, spark=None) -> dict:
             raise
         return _nothing_to_process(config, paths, metrics, started, str(exc))
 
+    # Counted before anything else. A job that reads objects and writes nothing
+    # is the hardest kind to diagnose after the fact: it reports success, and
+    # the only trace of what happened is the number of rows at each step.
+    raw_count = raw.count()
+    logger.info("Read %d row(s) from %s", raw_count, paths["bronze_events"])
+    if raw_count == 0:
+        return _read_nothing(config, paths, metrics, started, 0)
+
+    # Rows, but not one of them carries an event type: the objects are not
+    # NDJSON. A pretty-printed JSON file gives Spark one row per *line* of
+    # formatting, every field NULL — a non-zero count that means nothing.
+    # Without this, the job would blame deduplication for a format problem.
+    readable = raw.filter(F.col("event_type").isNotNull()).count()
+    if readable == 0:
+        return _read_nothing(config, paths, metrics, started, raw_count)
+    if readable < raw_count:
+        logger.warning(
+            "%d of %d row(s) had no event_type and will be dropped — check what is "
+            "under %s", raw_count - readable, raw_count, paths["bronze_events"],
+        )
+
     process_date = config.get("PROCESS_DATE")
     processed = to_processed(raw)
     if process_date:
@@ -1174,6 +1273,14 @@ def run_spark_job(config: dict, spark=None) -> dict:
     # Every curated table scans this DataFrame; caching pays for itself from the
     # second consumer onwards.
     processed = processed.cache()
+
+    processed_count = processed.count()
+    logger.info(
+        "%d row(s) survived cleaning and deduplication (from %d read)",
+        processed_count, raw_count,
+    )
+    if processed_count == 0:
+        return _kept_nothing(config, paths, metrics, started, raw_count, process_date)
 
     write_mode = config.get("WRITE_MODE", "overwrite")
     coalesce = int(config.get("COALESCE", 4))

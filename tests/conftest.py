@@ -51,3 +51,20 @@ def spark():
     session.sparkContext.setLogLevel("ERROR")
     yield session
     session.stop()
+
+
+@pytest.fixture()
+def local_fs(spark, tmp_path):
+    """Skip the test when Spark cannot use the local filesystem.
+
+    Writing a *directory* goes through Hadoop's native layer, which Windows
+    lacks without ``winutils.exe``. Reading a single file does not, so prefer a
+    file path and keep this fixture for tests that genuinely have to write.
+    """
+    try:
+        spark.createDataFrame([(1,)], ["n"]).write.mode("overwrite").parquet(
+            str(tmp_path / "_probe").replace("\\", "/")
+        )
+    except Exception:
+        pytest.skip("Spark local filesystem unavailable (winutils.exe missing on Windows)")
+    return tmp_path

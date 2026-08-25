@@ -117,3 +117,103 @@ def test_any_other_spark_error_still_fails_the_job(monkeypatch):
 
     with pytest.raises(RuntimeError, match="UNSUPPORTED_FEATURE"):
         silver.run_spark_job(CONFIG, spark="unused")
+
+
+# ─────────────────────────────────────────────
+# DES OBJETS, MAIS ZERO LIGNE
+#
+# Le cas le plus difficile a diagnostiquer : le job lit un prefixe qui contient
+# des objets, n'en tire aucune ligne, ecrit un dataset vide, et rapporte
+# SUCCEEDED en 34 secondes. Rien dans les logs ne disait combien de lignes
+# etaient entrees ni sorties.
+# ─────────────────────────────────────────────
+
+class _Rows:
+    """Un DataFrame reduit a ce que le job lui demande avant d'ecrire.
+
+    ``usable`` est le nombre de lignes portant un ``event_type`` : le job
+    distingue "aucune ligne" de "des lignes, toutes nulles", et le double
+    n'aurait aucun sens s'il confondait les deux.
+    """
+
+    def __init__(self, count, usable=None):
+        self._count = count
+        self._usable = count if usable is None else usable
+
+    def count(self):
+        return self._count
+
+    def cache(self):
+        return self
+
+    def filter(self, *_args):
+        # le seul filter() appele avant l'ecriture est celui d'event_type
+        return _Rows(self._usable)
+
+
+def test_objects_that_parse_to_zero_rows_are_reported(monkeypatch, caplog):
+    monkeypatch.setattr(silver, "_has_objects", lambda uri, client=None: True)
+    monkeypatch.setattr(silver, "read_raw", lambda *a, **kw: _Rows(0))
+
+    with caplog.at_level("WARNING"):
+        result = silver.run_spark_job(CONFIG, spark="unused")
+
+    assert result["reason"] == "bronze parsed to zero rows"
+    assert result["row_counts"] == {"raw": 0, "processed": 0}
+    assert "NDJSON" in caplog.text                      # ce qu'il attendait
+    assert "s3://data-lake-demo/silver/events/" in caplog.text
+
+
+def test_rows_read_but_none_kept_names_the_filter(monkeypatch, caplog, spark):
+    """``spark`` sert uniquement a activer un SparkContext : le job filtre
+    desormais sur ``F.col("event_type")``, qui en exige un."""
+    monkeypatch.setattr(silver, "_has_objects", lambda uri, client=None: True)
+    monkeypatch.setattr(silver, "read_raw", lambda *a, **kw: _Rows(120))
+    monkeypatch.setattr(silver, "to_processed", lambda raw: _Rows(0))
+
+    with caplog.at_level("WARNING"):
+        result = silver.run_spark_job(CONFIG, spark="unused")
+
+    assert result["row_counts"] == {"raw": 120, "processed": 0}
+    assert "Read 120 row(s)" in caplog.text
+    assert "cleaning or deduplication" in caplog.text
+
+
+def test_a_process_date_that_matches_nothing_says_so(monkeypatch, caplog, spark):
+    """La cause la plus banale : rejouer une date sans donnees.
+
+    ``spark`` n'est demande que pour activer un SparkContext : le filtre passe
+    par ``F.col``, qui exige un contexte actif meme sans donnees.
+    """
+    monkeypatch.setattr(silver, "_has_objects", lambda uri, client=None: True)
+    monkeypatch.setattr(silver, "read_raw", lambda *a, **kw: _Rows(120))
+    monkeypatch.setattr(silver, "to_processed", lambda raw: _Rows(0))
+
+    config = {**CONFIG, "PROCESS_DATE": "2020-01-01"}
+
+    with caplog.at_level("WARNING"):
+        silver.run_spark_job(config, spark="unused")
+
+    assert "PROCESS_DATE=2020-01-01 matched none of them" in caplog.text
+
+
+def test_the_row_counts_are_logged_on_a_normal_run(monkeypatch, caplog):
+    """Le compteur doit apparaitre aussi quand tout va bien."""
+    monkeypatch.setattr(silver, "_has_objects", lambda uri, client=None: True)
+    monkeypatch.setattr(silver, "read_raw", lambda *a, **kw: _Rows(120))
+
+    with caplog.at_level("INFO"):
+        with pytest.raises(Exception):
+            # l'ecriture Parquet echouera sur le faux DataFrame — peu importe,
+            # les deux lignes de comptage sont deja passees
+            silver.run_spark_job(CONFIG, spark="unused")
+
+    assert "Read 120 row(s)" in caplog.text
+
+
+def test_zero_rows_can_be_made_fatal(monkeypatch):
+    monkeypatch.setattr(silver, "_has_objects", lambda uri, client=None: True)
+    monkeypatch.setattr(silver, "read_raw", lambda *a, **kw: _Rows(0))
+
+    with pytest.raises(ValueError, match="No usable event"):
+        silver.run_spark_job({**CONFIG, "FAIL_ON_EMPTY_BRONZE": "true"}, spark="unused")
