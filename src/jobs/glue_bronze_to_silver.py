@@ -1468,10 +1468,6 @@ def main(argv=None) -> dict:
     return run_spark_job(config)
 
 
-if __name__ == "__main__":
-    print(json.dumps(main(), indent=2, default=str))
-
-
 # ─────────────────────────────────────────────
 # INPUT / OUTPUT CONTRACT
 # ─────────────────────────────────────────────
@@ -1520,3 +1516,7 @@ def log_io(config: dict) -> None:
                 )
     except Exception as exc:  # noqa: BLE001 - diagnostics must not stop the job
         logger.warning("Could not describe the input/output contract: %s", exc)
+
+
+if __name__ == "__main__":
+    print(json.dumps(main(), indent=2, default=str))
