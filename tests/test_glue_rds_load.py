@@ -481,3 +481,48 @@ def test_the_error_still_reads_without_a_config_path():
     message = glue_job._missing_settings_message(["RDS_HOST"], {})
 
     assert "--CONFIG_PATH" in message
+
+
+# ─────────────────────────────────────────────
+# LES MODES D'ECRITURE DE LA DISPOSITION PAR DEFAUT
+#
+# Sans `mode` explicite, une cible retombe sur RDS_WRITE_MODE, dont le defaut
+# est "append". Toute la disposition par defaut appendait donc — et chaque
+# table gold doublait a chaque run quotidien. Rendu visible en declarant le
+# contrat d'entree/sortie du job.
+# ─────────────────────────────────────────────
+
+def test_the_event_log_appends():
+    """fact_events est un journal : on ajoute, on ne remplace pas."""
+    targets = {t["dataset"]: t for t in glue_job.resolve_targets({"OUTPUT_BUCKET": "lake"})}
+
+    assert targets["silver/events"]["mode"] == "append"
+
+
+@pytest.mark.parametrize(
+    "dataset",
+    ["gold/sessions", "gold/funnel_daily", "gold/orders",
+     "gold/customer_rfm", "gold/product_daily", "gold/anomalies"],
+)
+def test_every_gold_table_overwrites(dataset):
+    """Une table gold est reconstruite entiere : l'appender la ferait doubler."""
+    targets = {t["dataset"]: t for t in glue_job.resolve_targets({"OUTPUT_BUCKET": "lake"})}
+
+    assert targets[dataset]["mode"] == "overwrite", (
+        f"{dataset} en append : la table doublerait a chaque execution"
+    )
+
+
+def test_every_default_target_states_its_mode():
+    """Le defaut implicite est ce qui a cause le bug — plus aucun ne doit s'y fier."""
+    for target in glue_job.DEFAULT_TARGETS:
+        assert "mode" in target, f"{target['dataset']} sans mode explicite"
+
+
+def test_an_explicit_config_can_still_override_the_mode():
+    config = {
+        "OUTPUT_BUCKET": "lake",
+        "RDS_TABLES": [{"dataset": "gold/orders", "table": "fact_orders", "mode": "append"}],
+    }
+
+    assert glue_job.resolve_targets(config)[0]["mode"] == "append"

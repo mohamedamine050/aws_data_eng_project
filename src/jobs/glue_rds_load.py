@@ -358,14 +358,19 @@ REQUIRED_COLUMNS = [
 
 #: Default warehouse layout: every dataset the lake produces, and the table it
 #: lands in. Override per-target via ``RDS_TABLES`` in the config.
+#: Every mode is explicit, and that is not decoration. Without a ``mode`` a
+#: target falls back to ``RDS_WRITE_MODE``, which defaults to ``append`` — so
+#: the whole default layout used to append, and every gold table doubled on
+#: each run. ``fact_events`` is the only one that appends: it is a log.
+#: The gold tables are rebuilt whole each time, so they overwrite.
 DEFAULT_TARGETS = [
-    {"dataset": "silver/events", "table": "fact_events", "optional": False},
-    {"dataset": "gold/sessions", "table": "fact_sessions"},
-    {"dataset": "gold/funnel_daily", "table": "agg_funnel_daily"},
-    {"dataset": "gold/orders", "table": "fact_orders"},
-    {"dataset": "gold/customer_rfm", "table": "dim_customer_rfm"},
-    {"dataset": "gold/product_daily", "table": "agg_product_daily"},
-    {"dataset": "gold/anomalies", "table": "fact_anomalies"},
+    {"dataset": "silver/events", "table": "fact_events", "mode": "append", "optional": False},
+    {"dataset": "gold/sessions", "table": "fact_sessions", "mode": "overwrite"},
+    {"dataset": "gold/funnel_daily", "table": "agg_funnel_daily", "mode": "overwrite"},
+    {"dataset": "gold/orders", "table": "fact_orders", "mode": "overwrite"},
+    {"dataset": "gold/customer_rfm", "table": "dim_customer_rfm", "mode": "overwrite"},
+    {"dataset": "gold/product_daily", "table": "agg_product_daily", "mode": "overwrite"},
+    {"dataset": "gold/anomalies", "table": "fact_anomalies", "mode": "overwrite"},
 ]
 
 #: Datasets the load must not silently skip. Everything else is optional: a
@@ -670,6 +675,8 @@ def main() -> None:
     # Recorded so a validation failure can name the file it read.
     config.setdefault("CONFIG_PATH", args["config"])
 
+    log_io(config)
+
     rds_settings = _resolve_rds_settings(config)
     targets = resolve_targets(config)
     logger.info("Loading %d target(s): %s", len(targets), [t["table"] for t in targets])
@@ -709,3 +716,56 @@ def main() -> None:
 
 if __name__ == "__main__":
     main()
+
+
+# ─────────────────────────────────────────────
+# INPUT / OUTPUT CONTRACT
+# ─────────────────────────────────────────────
+
+def describe_io(config: dict) -> dict:
+    """Where this job reads, and which warehouse tables it writes.
+
+    The only stage whose output is not S3. The tables must already exist —
+    ``sql/warehouse/001_schema.sql`` — because an ``overwrite`` TRUNCATEs
+    rather than dropping, to keep types, indexes and grants.
+    """
+    host = config.get("RDS_HOST") or "<RDS_HOST>"
+    database = config.get("RDS_DATABASE") or "<RDS_DATABASE>"
+    targets = resolve_targets(config)  # resolved once: it logs which layout it picked
+    return {
+        "job": "glue_rds_load",
+        "reads": [
+            {"what": target.get("dataset", "?"), "format": "Parquet",
+             "where": target.get("path", "?")}
+            for target in targets
+        ],
+        "writes": [
+            {"what": target.get("table", "?"),
+             "format": f"PostgreSQL ({target.get('mode', 'append')})",
+             "where": f"jdbc:postgresql://{host}/{database}"}
+            for target in targets
+        ],
+    }
+
+
+def log_io(config: dict) -> None:
+    """Print the contract at start-up, before any work.
+
+    A job that reports success without writing anything is the hardest failure
+    to diagnose, and the first question is always the same: which prefix did it
+    actually read? Answer it in the first three lines of the log rather than
+    after an afternoon of guessing.
+    """
+    # Never raises. This is diagnostics printed before any work — a job killed
+    # by its own logging is the worst possible trade.
+    try:
+        contract = describe_io(config)
+        logger.info("--- %s : input/output contract ---", contract["job"])
+        for side in ("reads", "writes"):
+            for item in contract[side]:
+                logger.info(
+                    "  %-6s %-26s %-12s %s",
+                    side.upper(), item.get("what"), f"[{item.get('format')}]", item.get("where"),
+                )
+    except Exception as exc:  # noqa: BLE001 - diagnostics must not stop the job
+        logger.warning("Could not describe the input/output contract: %s", exc)

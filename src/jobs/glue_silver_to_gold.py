@@ -666,6 +666,7 @@ def run(config: Dict[str, Any], spark: Any = None) -> Dict[str, Any]:
     paths = build_paths(config)
     wanted = plan(config)
     metrics = JobMetrics.from_config(config, stage="glue_silver_to_gold")
+    log_io(config)
 
     spark = spark or SparkSession.builder.appName(config.get("JOB_NAME", "silver-to-gold")).getOrCreate()
 
@@ -761,3 +762,47 @@ def main(argv=None) -> Dict[str, Any]:
 
 if __name__ == "__main__":
     print(json.dumps(main(), indent=2, default=str))
+
+
+# ─────────────────────────────────────────────
+# INPUT / OUTPUT CONTRACT
+# ─────────────────────────────────────────────
+
+def describe_io(config: dict) -> dict:
+    """Where this job reads and writes, and in what format."""
+    paths = build_paths(config)
+    return {
+        "job": "glue_silver_to_gold",
+        "reads": [
+            {"what": "silver events", "format": "Parquet",
+             "where": paths["silver_events"]},
+        ],
+        "writes": [
+            {"what": f"gold {name}", "format": "Parquet",
+             "where": gold_path(config, name)}
+            for name in plan(config)
+        ],
+    }
+
+
+def log_io(config: dict) -> None:
+    """Print the contract at start-up, before any work.
+
+    A job that reports success without writing anything is the hardest failure
+    to diagnose, and the first question is always the same: which prefix did it
+    actually read? Answer it in the first three lines of the log rather than
+    after an afternoon of guessing.
+    """
+    # Never raises. This is diagnostics printed before any work — a job killed
+    # by its own logging is the worst possible trade.
+    try:
+        contract = describe_io(config)
+        logger.info("--- %s : input/output contract ---", contract["job"])
+        for side in ("reads", "writes"):
+            for item in contract[side]:
+                logger.info(
+                    "  %-6s %-26s %-12s %s",
+                    side.upper(), item.get("what"), f"[{item.get('format')}]", item.get("where"),
+                )
+    except Exception as exc:  # noqa: BLE001 - diagnostics must not stop the job
+        logger.warning("Could not describe the input/output contract: %s", exc)

@@ -767,11 +767,65 @@ def archive_prefix(config: dict) -> str:
     return f"{zone_prefix(config, 'landing')}{_norm(config.get('LANDING_ARCHIVE_SUBPATH', DEFAULT_ARCHIVE_SUBPATH))}"
 
 
+# ─────────────────────────────────────────────
+# INPUT / OUTPUT CONTRACT
+# ─────────────────────────────────────────────
+
+def describe_io(config: dict) -> dict:
+    """Where this job reads and writes, and in what format.
+
+    Declared rather than implied. ``tests/test_io_contracts.py`` pins every
+    entry against the path the code actually uses, and checks that what this
+    job writes is what the next one reads.
+    """
+    bucket = config["OUTPUT_BUCKET"]
+    paths = build_paths(config)
+    return {
+        "job": "glue_landing_ingest",
+        "reads": [
+            {"what": "partner file drops", "format": "CSV / JSON / NDJSON",
+             "where": f"s3://{bucket}/{ingest_prefix(config)}"},
+        ],
+        "writes": [
+            {"what": "bronze events", "format": "NDJSON, one event per line",
+             "where": paths["bronze_events"]},
+            {"what": "rejected records", "format": "NDJSON + failing rules",
+             "where": f"{paths['quarantine'].rstrip('/')}/landing/"},
+            {"what": "ingested files (moved)", "format": "as received",
+             "where": f"s3://{bucket}/{archive_prefix(config)}"},
+        ],
+    }
+
+
+def log_io(config: dict) -> None:
+    """Print the contract at start-up, before any work.
+
+    A job that reports success without writing anything is the hardest failure
+    to diagnose, and the first question is always the same: which prefix did it
+    actually read? Answer it in the first three lines of the log rather than
+    after an afternoon of guessing.
+    """
+    # Never raises. This is diagnostics printed before any work — a job killed
+    # by its own logging is the worst possible trade.
+    try:
+        contract = describe_io(config)
+        logger.info("--- %s : input/output contract ---", contract["job"])
+        for side in ("reads", "writes"):
+            for item in contract[side]:
+                logger.info(
+                    "  %-6s %-26s %-12s %s",
+                    side.upper(), item.get("what"), f"[{item.get('format')}]", item.get("where"),
+                )
+    except Exception as exc:  # noqa: BLE001 - diagnostics must not stop the job
+        logger.warning("Could not describe the input/output contract: %s", exc)
+
+
 def run(config: Dict[str, Any], spark: Any = None, s3: Any = None) -> Dict[str, Any]:
     started = datetime.now(timezone.utc)
     bucket = config["OUTPUT_BUCKET"]
     paths = build_paths(config)
     metrics = JobMetrics.from_config(config, stage="glue_landing_ingest")
+    log_io(config)
 
     s3 = s3 or boto3.client("s3")
     drops = list_drops(bucket, ingest_prefix(config), s3=s3)

@@ -412,6 +412,35 @@ def _has_objects(s3_uri: str, client=None) -> bool:
     return response.get("KeyCount", 0) > 0
 
 
+def _key_of(s3_uri: str) -> str:
+    """``s3://bucket/a/b/`` -> ``a/b/``."""
+    if not s3_uri.startswith("s3://"):
+        return s3_uri
+    _bucket, _, key = s3_uri[len("s3://"):].partition("/")
+    return key
+
+
+def sample_keys(bucket: str, prefix: str, client=None, limit: int = 10) -> List[str]:
+    """A handful of the keys under ``prefix`` — for diagnostics, not for work.
+
+    Never raises: this runs on a path the job is already reporting a problem
+    about, and losing the real message to a listing error would be perverse.
+    """
+    client = client or s3
+    keys: List[str] = []
+    try:
+        paginator = client.get_paginator("list_objects_v2")
+        for page in paginator.paginate(Bucket=bucket, Prefix=prefix):
+            for obj in page.get("Contents", []):
+                if not obj["Key"].endswith("/"):
+                    keys.append(obj["Key"])
+                if len(keys) >= limit:
+                    return keys
+    except Exception as exc:  # noqa: BLE001 - diagnostics must not mask the real error
+        logger.debug("Could not list %s for diagnostics: %s", prefix, exc)
+    return keys
+
+
 def _nothing_to_process(config: dict, paths: dict, metrics, started, detail: str) -> dict:
     """Bronze has never been written to — say so instead of raising Spark's error.
 
@@ -427,6 +456,17 @@ def _nothing_to_process(config: dict, paths: dict, metrics, started, detail: str
         f"Lambda (the queue) — check that one of them has run and actually wrote "
         f"records. Underlying error: {detail}"
     )
+
+    # Nearly always the objects are in the bucket, one prefix off: dropped at
+    # `bronze/` instead of `bronze/events/`. Show what is actually up there, so
+    # the log answers the next question rather than prompting it.
+    nearby = sample_keys(paths["bucket"], zone_prefix(config, "bronze"))
+    strays = [key for key in nearby if not key.startswith(_key_of(paths["bronze_events"]))]
+    if strays:
+        message += (
+            f"\nFound under s3://{paths['bucket']}/{zone_prefix(config, 'bronze')} but "
+            f"outside the prefix this job reads: {', '.join(strays)}"
+        )
 
     metrics.count("RecordsProcessed", 0)
     metrics.flush()
@@ -1228,6 +1268,7 @@ def run_spark_job(config: dict, spark=None) -> dict:
     """
     paths = build_paths(config)
     metrics = JobMetrics.from_config(config, stage="glue_processing")
+    log_io(config)
     started = datetime.now(timezone.utc)
 
     spark = spark or SparkSession.builder.appName(config.get("JOB_NAME", "ecommerce-processing")).getOrCreate()
@@ -1429,3 +1470,53 @@ def main(argv=None) -> dict:
 
 if __name__ == "__main__":
     print(json.dumps(main(), indent=2, default=str))
+
+
+# ─────────────────────────────────────────────
+# INPUT / OUTPUT CONTRACT
+# ─────────────────────────────────────────────
+
+def describe_io(config: dict) -> dict:
+    """Where this job reads and writes, and in what format.
+
+    The format matters as much as the path here: bronze must be NDJSON. A
+    pretty-printed JSON or a CSV under the same prefix reads as rows with every
+    field NULL — no error, no data.
+    """
+    paths = build_paths(config)
+    return {
+        "job": "glue_bronze_to_silver",
+        "reads": [
+            {"what": "bronze events", "format": "NDJSON, one event per line",
+             "where": paths["bronze_events"]},
+        ],
+        "writes": [
+            {"what": "silver events", "format": "Parquet, partitioned by date/hour",
+             "where": paths["silver_events"]},
+            {"what": "quality report", "format": "JSON, one per run",
+             "where": f"s3://{paths['bucket']}/{zone_prefix(config, 'quality')}"},
+        ],
+    }
+
+
+def log_io(config: dict) -> None:
+    """Print the contract at start-up, before any work.
+
+    A job that reports success without writing anything is the hardest failure
+    to diagnose, and the first question is always the same: which prefix did it
+    actually read? Answer it in the first three lines of the log rather than
+    after an afternoon of guessing.
+    """
+    # Never raises. This is diagnostics printed before any work — a job killed
+    # by its own logging is the worst possible trade.
+    try:
+        contract = describe_io(config)
+        logger.info("--- %s : input/output contract ---", contract["job"])
+        for side in ("reads", "writes"):
+            for item in contract[side]:
+                logger.info(
+                    "  %-6s %-26s %-12s %s",
+                    side.upper(), item.get("what"), f"[{item.get('format')}]", item.get("where"),
+                )
+    except Exception as exc:  # noqa: BLE001 - diagnostics must not stop the job
+        logger.warning("Could not describe the input/output contract: %s", exc)

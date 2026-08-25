@@ -218,6 +218,7 @@ def send_messages(queue_url: str, records: List[Dict[str, Any]]) -> int:
 def lambda_handler(event: Dict[str, Any], context: Any) -> Dict[str, Any]:  # noqa: ARG001
     args = get_args(event)
     config = load_config(args["CONFIG_PATH"])
+    log_io(config)
 
     queue_url = config.get("QUEUE_URL")
     if not queue_url:
@@ -272,3 +273,48 @@ def lambda_handler(event: Dict[str, Any], context: Any) -> Dict[str, Any]:  # no
 
     LOGGER.info("Producer run: %s", json.dumps(result, default=str))
     return result
+
+
+# ─────────────────────────────────────────────
+# INPUT / OUTPUT CONTRACT
+# ─────────────────────────────────────────────
+
+def describe_io(config: dict) -> dict:
+    """Where this function reads and writes.
+
+    The only component that writes nothing to S3: its output is the queue.
+    """
+    sources = [
+        {"what": "catalog API", "format": "HTTP JSON", "where": config.get("ECOMMERCE_API_URL")},
+        {"what": "product catalog", "format": "CSV", "where": config.get("PRODUCTS_S3_CSV")},
+        {"what": "product catalog", "format": "JSON", "where": config.get("PRODUCTS_S3_JSON")},
+        {"what": "customer list", "format": "CSV", "where": config.get("CUSTOMERS_S3_CSV")},
+    ]
+    if config.get("PRODUCTS"):
+        sources.insert(0, {"what": "inline products", "format": "config list",
+                           "where": f"{len(config['PRODUCTS'])} product(s) in the config"})
+    return {
+        "job": "ecommerce_producer",
+        "reads": [source for source in sources if source["where"]],
+        "writes": [
+            {"what": "simulated events", "format": "JSON message body",
+             "where": config.get("QUEUE_URL") or "<QUEUE_URL>"},
+        ],
+    }
+
+
+def log_io(config: dict) -> None:
+    """Print the contract at start-up, before any work."""
+    # Never raises. This is diagnostics printed before any work — a job killed
+    # by its own logging is the worst possible trade.
+    try:
+        contract = describe_io(config)
+        LOGGER.info("--- %s : input/output contract ---", contract["job"])
+        for side in ("reads", "writes"):
+            for item in contract[side]:
+                LOGGER.info(
+                    "  %-6s %-26s %-12s %s",
+                    side.upper(), item.get("what"), f"[{item.get('format')}]", item.get("where"),
+                )
+    except Exception as exc:  # noqa: BLE001 - diagnostics must not stop the job
+        LOGGER.warning("Could not describe the input/output contract: %s", exc)

@@ -217,3 +217,64 @@ def test_zero_rows_can_be_made_fatal(monkeypatch):
 
     with pytest.raises(ValueError, match="No usable event"):
         silver.run_spark_job({**CONFIG, "FAIL_ON_EMPTY_BRONZE": "true"}, spark="unused")
+
+
+# ─────────────────────────────────────────────
+# LES OBJETS SONT LA, UN PREFIXE TROP HAUT
+#
+# Le cas reel : le fichier depose a `bronze/123.json` au lieu de
+# `bronze/events/`. Le job lit un prefixe vide et rapporte SUCCEEDED. Le log
+# doit nommer les objets qu'il a vus a cote.
+# ─────────────────────────────────────────────
+
+class _Listing:
+    def __init__(self, keys):
+        self.keys = keys
+
+    def get_paginator(self, _name):
+        keys = self.keys
+
+        class _P:
+            def paginate(self, Bucket, Prefix):  # noqa: N803
+                yield {"Contents": [{"Key": k} for k in keys if k.startswith(Prefix)]}
+
+        return _P()
+
+
+def test_objects_one_prefix_too_high_are_named_in_the_log(monkeypatch, caplog):
+    monkeypatch.setattr(silver, "_has_objects", lambda uri, client=None: False)
+    monkeypatch.setattr(silver, "s3", _Listing(["bronze/123.json", "bronze/456.json"]))
+
+    with caplog.at_level("WARNING"):
+        silver.run_spark_job(CONFIG, spark="unused")
+
+    assert "bronze/123.json" in caplog.text
+    assert "outside the prefix this job reads" in caplog.text
+
+
+def test_objects_in_the_right_place_are_not_reported_as_strays(monkeypatch, caplog):
+    """Ce qui est deja sous bronze/events/ n'est pas un egare."""
+    monkeypatch.setattr(silver, "_has_objects", lambda uri, client=None: False)
+    monkeypatch.setattr(
+        silver, "s3", _Listing(["bronze/events/dt=2026-06-24/hour=12/part-0.json"])
+    )
+
+    with caplog.at_level("WARNING"):
+        silver.run_spark_job(CONFIG, spark="unused")
+
+    assert "outside the prefix this job reads" not in caplog.text
+
+
+def test_a_listing_failure_never_hides_the_real_message(monkeypatch, caplog):
+    class _Broken:
+        def get_paginator(self, _name):
+            raise RuntimeError("access denied")
+
+    monkeypatch.setattr(silver, "_has_objects", lambda uri, client=None: False)
+    monkeypatch.setattr(silver, "s3", _Broken())
+
+    with caplog.at_level("WARNING"):
+        result = silver.run_spark_job(CONFIG, spark="unused")
+
+    assert result["records"] == 0
+    assert "Nothing to process" in caplog.text

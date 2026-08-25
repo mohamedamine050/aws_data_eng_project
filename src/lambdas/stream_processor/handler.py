@@ -244,6 +244,7 @@ def _write_rejected(bucket: str, prefix: str, rejected: List[Dict[str, Any]]) ->
 def lambda_handler(event: Dict[str, Any], context: Any) -> Dict[str, Any]:  # noqa: ARG001
     args = get_args(event)
     config = load_config(args["CONFIG_PATH"])
+    log_io(config)
 
     bucket = config["OUTPUT_BUCKET"]
     # bronze/events and quarantine/events — RAW_PREFIX / REJECTED_PREFIX still
@@ -359,3 +360,45 @@ def lambda_handler(event: Dict[str, Any], context: Any) -> Dict[str, Any]:  # no
 
 
 handler = lambda_handler
+
+
+# ─────────────────────────────────────────────
+# INPUT / OUTPUT CONTRACT
+# ─────────────────────────────────────────────
+
+def describe_io(config: dict) -> dict:
+    """Where this function reads and writes, and in what format.
+
+    It shares ``bronze/events/`` with the landing Glue job, so both must write
+    the same NDJSON shape — pinned by tests/test_format_contracts.py.
+    """
+    return {
+        "job": "stream_processor",
+        "reads": [
+            {"what": "queued events", "format": "JSON message body",
+             "where": config.get("QUEUE_URL") or "<QUEUE_URL>"},
+        ],
+        "writes": [
+            {"what": "bronze events", "format": "NDJSON, one event per line",
+             "where": lakehouse.dataset_path(config, "bronze/events")},
+            {"what": "rejected records", "format": "NDJSON + failing rules",
+             "where": lakehouse.dataset_path(config, "quarantine/events")},
+        ],
+    }
+
+
+def log_io(config: dict) -> None:
+    """Print the contract at start-up, before any work."""
+    # Never raises. This is diagnostics printed before any work — a job killed
+    # by its own logging is the worst possible trade.
+    try:
+        contract = describe_io(config)
+        LOGGER.info("--- %s : input/output contract ---", contract["job"])
+        for side in ("reads", "writes"):
+            for item in contract[side]:
+                LOGGER.info(
+                    "  %-6s %-26s %-12s %s",
+                    side.upper(), item.get("what"), f"[{item.get('format')}]", item.get("where"),
+                )
+    except Exception as exc:  # noqa: BLE001 - diagnostics must not stop the job
+        LOGGER.warning("Could not describe the input/output contract: %s", exc)

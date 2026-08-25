@@ -116,7 +116,10 @@ def test_rds_main_runs_end_to_end_over_stubs(config_file, monkeypatch, capsys):
     monkeypatch.setattr(rds.sys, "argv", ["prog", "--JOB_NAME", "x", "--CONFIG_PATH", config_file])
     monkeypatch.setattr(rds, "SparkSession", type("S", (), {"builder": DummyBuilder()}))
     monkeypatch.setattr(rds, "_resolve_rds_settings", lambda config: {"url": "jdbc:postgresql://db/x"})
-    monkeypatch.setattr(rds, "resolve_targets", lambda config: [{"table": "fact_events"}])
+    monkeypatch.setattr(rds, "resolve_targets", lambda config: [
+        {"dataset": "silver/events", "path": "s3://demo-lake/silver/events/",
+         "table": "fact_events", "mode": "append"},
+    ])
     monkeypatch.setattr(
         rds,
         "load_targets",
