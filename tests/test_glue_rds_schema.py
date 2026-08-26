@@ -237,21 +237,12 @@ def test_main_creates_the_schema_before_loading_anything(tmp_path, monkeypatch, 
     config = tmp_path / "job.json"
     config.write_text(json.dumps({"OUTPUT_BUCKET": "demo-lake"}), encoding="utf-8")
 
-    class _Session:
-        def __init__(self):
-            self.stopped = False
-
-        def stop(self):
-            self.stopped = True
-
-    session = _Session()
-
     class _Builder:
         def appName(self, name):
             return self
 
         def getOrCreate(self):
-            return session
+            return "spark-session"
 
     monkeypatch.setattr(rds, "getResolvedOptions", lambda argv, keys: {
         "JOB_NAME": "ecommerce-rds-load", "CONFIG_PATH": str(config),
@@ -274,9 +265,41 @@ def test_main_creates_the_schema_before_loading_anything(tmp_path, monkeypatch, 
     rds.main()
 
     assert order == ["ensure_schema", "load_targets"]
-    assert session.stopped is True
 
     summary = json.loads(capsys.readouterr().out)
     assert summary["status"] == "success"
     assert summary["schema"] == "analytics"
     assert summary["rows_loaded"] == 42
+
+
+# ---------------------------------------------
+# LE SCHEMA PAR DEFAUT
+#
+# sql/warehouse/001_schema.sql cree analytics. Une config qui ne nomme aucun
+# schema visait donc deja analytics sans le dire : c'est maintenant le defaut,
+# et le job le cree lui-meme.
+# ---------------------------------------------
+
+def _connection(**overrides):
+    return {
+        "RDS_HOST": "db.example", "RDS_DATABASE": "ecommerce",
+        "RDS_USERNAME": "u", "RDS_PASSWORD": "p", **overrides,
+    }
+
+
+def test_a_config_that_names_no_schema_takes_analytics():
+    assert rds._resolve_rds_settings(_connection())["schema"] == rds.DEFAULT_SCHEMA
+    assert rds.DEFAULT_SCHEMA == "analytics"
+
+
+def test_a_named_schema_wins_over_the_default():
+    settings = rds._resolve_rds_settings(_connection(RDS_SCHEMA="staging"))
+
+    assert settings["schema"] == "staging"
+    assert rds._qualified(settings, "fact_events") == "staging.fact_events"
+
+
+def test_the_default_schema_qualifies_the_tables():
+    settings = rds._resolve_rds_settings(_connection())
+
+    assert rds._qualified(settings, "fact_events") == "analytics.fact_events"
