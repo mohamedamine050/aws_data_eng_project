@@ -1,38 +1,3 @@
-"""Glue job 4 — **the lake → the PostgreSQL warehouse**.
-
-    S3 silver/events ──┐
-    S3 gold/*        ──┴──> Spark JDBC ──> PostgreSQL (RDS)
-
-Loads a *set* of targets — the event fact table plus every gold table — in one
-pass, sharing a single JDBC connection profile. Which targets run is config,
-not code:
-
-    "RDS_TABLES": [
-      {"dataset": "silver/events", "table": "analytics.fact_events"},
-      {"dataset": "gold/orders",   "table": "analytics.fact_orders", "mode": "overwrite"}
-    ]
-
-Dataset names accept both the medallion form and the pre-medallion aliases
-(``processed``, ``curated/orders``). Setting ``RDS_TABLE`` instead keeps the
-original single-table behaviour (``PROCESSED_S3_PATH`` → that one table), so
-existing schedules are unaffected. Naming no table at all loads the default
-warehouse layout — the seven tables in ``DEFAULT_TARGETS``.
-
-The RDS connection comes from the config file at ``--CONFIG_PATH`` — one place,
-read once: ``RDS_HOST``, ``RDS_PORT``, ``RDS_DATABASE``, ``RDS_SCHEMA``,
-``RDS_USERNAME``, ``RDS_PASSWORD``, ``RDS_SSLMODE``. Setting ``RDS_SECRET_ARN``
-in that same file moves the credentials to Secrets Manager, which fills in
-whatever the file leaves blank.
-
-Self-contained on purpose: the JDBC and credential handling lives in this file,
-so the Glue job's *Script path* is the whole story.
-
-Target tables must already exist — create them with ``sql/warehouse/001_schema.sql``.
-``overwrite`` TRUNCATEs rather than dropping, so their column types, indexes and
-grants survive every load. Re-running a partition into the append-only
-``fact_events`` goes through the staging upsert in ``sql/warehouse/003_upsert.sql``.
-"""
-
 from __future__ import annotations
 
 import argparse
@@ -48,9 +13,8 @@ import boto3
 
 try:
     from pyspark.sql import SparkSession
-except Exception:  # pragma: no cover - environment may not have pyspark installed
+except Exception:
     SparkSession = None
-
 
 try:
     from awsglue.utils import getResolvedOptions
@@ -58,26 +22,32 @@ except Exception:
     getResolvedOptions = None
 
 
+# ============================================================
+# LOGGING
+# ============================================================
+
 logging.basicConfig(
     level=logging.INFO,
     format="%(asctime)s - %(levelname)s - %(message)s",
 )
+
 logger = logging.getLogger(__name__)
 
-# ─────────────────────────────────────────────
+
+# ============================================================
 # LAKE LAYOUT
-# ─────────────────────────────────────────────
-# A copy of common/py, deliberately: one file is one Glue job,
-# complete, and common/ belongs to the Lambdas. Nothing here may be edited on
-# its own — tests/test_job_self_containment.py pins every copy against the
-# original, so a divergence fails the build rather than silently writing a day
-# of data into the wrong prefix.
+# ============================================================
 
-#: The medallion zones, in flow order.
-ZONES: tuple = ("landing", "bronze", "silver", "gold", "quarantine", "quality")
+ZONES = (
+    "landing",
+    "bronze",
+    "silver",
+    "gold",
+    "quarantine",
+    "quality",
+)
 
-#: Default prefix of each zone inside ``OUTPUT_BUCKET``.
-DEFAULT_ZONE_PREFIXES: dict = {
+DEFAULT_ZONE_PREFIXES = {
     "landing": "landing/",
     "bronze": "bronze/",
     "silver": "silver/",
@@ -86,21 +56,17 @@ DEFAULT_ZONE_PREFIXES: dict = {
     "quality": "quality/",
 }
 
-#: Pre-medallion config key that still defines a whole zone.
-LEGACY_ZONE_KEYS: dict = {
+LEGACY_ZONE_KEYS = {
     "gold": "CURATED_PREFIX",
 }
 
-#: Pre-medallion config keys that define a single dataset:
-#: ``dataset -> (prefix key, full-path key)``.
-LEGACY_DATASET_KEYS: dict = {
+LEGACY_DATASET_KEYS = {
     "bronze/events": ("RAW_PREFIX", "RAW_S3_PATH"),
     "silver/events": ("PROCESSED_PREFIX", "PROCESSED_S3_PATH"),
     "quarantine/events": ("REJECTED_PREFIX", None),
 }
 
-#: Gold datasets and the columns they are partitioned by (``None`` = unpartitioned).
-GOLD_DATASETS: dict = {
+GOLD_DATASETS = {
     "sessions": ["partition_date"],
     "funnel_daily": ["partition_date"],
     "orders": ["partition_date"],
@@ -110,24 +76,28 @@ GOLD_DATASETS: dict = {
 }
 
 
-# -------------------------------------------------
-# PREFIXES
-# -------------------------------------------------
+# ============================================================
+# PATH HELPERS
+# ============================================================
 
 def _norm(prefix: str) -> str:
-    """``"/gold"`` -> ``"gold/"``; the empty prefix stays empty (bucket root)."""
     prefix = str(prefix).strip().strip("/")
     return f"{prefix}/" if prefix else ""
 
 
 def zone_prefix(config: dict, zone: str) -> str:
-    """Prefix of a zone: ``<ZONE>_PREFIX``, then its legacy key, then the default."""
     if zone not in DEFAULT_ZONE_PREFIXES:
-        raise ValueError(f"Unknown zone '{zone}' (expected one of {list(ZONES)})")
+        raise ValueError(
+            f"Unknown zone '{zone}'"
+        )
 
-    for key in (f"{zone.upper()}_PREFIX", LEGACY_ZONE_KEYS.get(zone)):
+    for key in (
+        f"{zone.upper()}_PREFIX",
+        LEGACY_ZONE_KEYS.get(zone),
+    ):
         if key and config.get(key) is not None:
             return _norm(config[key])
+
     return DEFAULT_ZONE_PREFIXES[zone]
 
 
@@ -137,17 +107,23 @@ def _split(dataset: str) -> Tuple[str, str]:
 
 
 def dataset_prefix(config: dict, dataset: str) -> str:
-    """Prefix of a dataset such as ``bronze/events`` or ``gold/orders``.
-
-    Precedence: the derived key (``BRONZE_EVENTS_PREFIX``), then the legacy key
-    (``RAW_PREFIX``), then ``<zone prefix>/<name>/``.
-    """
     zone, name = _split(dataset)
+
     if not name:
         return zone_prefix(config, zone)
 
-    derived = f"{zone.upper()}_{name.upper().replace('/', '_')}_PREFIX"
-    legacy = (LEGACY_DATASET_KEYS.get(f"{zone}/{name}") or (None, None))[0]
+    derived = (
+        f"{zone.upper()}_"
+        f"{name.upper().replace('/', '_')}_PREFIX"
+    )
+
+    legacy = (
+        LEGACY_DATASET_KEYS.get(
+            f"{zone}/{name}"
+        )
+        or (None, None)
+    )[0]
+
     for key in (derived, legacy):
         if key and config.get(key) is not None:
             return _norm(config[key])
@@ -155,187 +131,162 @@ def dataset_prefix(config: dict, dataset: str) -> str:
     return f"{zone_prefix(config, zone)}{name}/"
 
 
-# -------------------------------------------------
-# PATHS
-# -------------------------------------------------
-
 def s3_path(bucket: str, prefix: str) -> str:
     return f"s3://{bucket}/{_norm(prefix)}"
 
 
 def zone_path(config: dict, zone: str) -> str:
-    return s3_path(config["OUTPUT_BUCKET"], zone_prefix(config, zone))
+    return s3_path(
+        config["OUTPUT_BUCKET"],
+        zone_prefix(config, zone),
+    )
 
 
 def dataset_path(config: dict, dataset: str) -> str:
-    """Full ``s3://`` path of a dataset, honouring any full-path override.
 
-    ``dataset`` may itself be an ``s3://`` URI, which is returned as-is — that
-    is what lets a config point one target at another bucket entirely.
-    """
     if dataset.startswith("s3://"):
-        return dataset if dataset.endswith("/") else dataset + "/"
+        return (
+            dataset
+            if dataset.endswith("/")
+            else dataset + "/"
+        )
 
     zone, name = _split(dataset)
+
     derived = (
-        f"{zone.upper()}_{name.upper().replace('/', '_')}_S3_PATH" if name
+        f"{zone.upper()}_"
+        f"{name.upper().replace('/', '_')}_S3_PATH"
+        if name
         else f"{zone.upper()}_S3_PATH"
     )
-    legacy = (LEGACY_DATASET_KEYS.get(dataset) or (None, None))[1]
+
+    legacy = (
+        LEGACY_DATASET_KEYS.get(dataset)
+        or (None, None)
+    )[1]
+
     for key in (derived, legacy):
         if key and config.get(key):
             value = str(config[key])
-            return value if value.endswith("/") else value + "/"
+            return (
+                value
+                if value.endswith("/")
+                else value + "/"
+            )
 
-    return s3_path(config["OUTPUT_BUCKET"], dataset_prefix(config, dataset))
+    return s3_path(
+        config["OUTPUT_BUCKET"],
+        dataset_prefix(config, dataset),
+    )
 
 
 def gold_path(config: dict, name: str) -> str:
-    return dataset_path(config, f"gold/{name}")
+    return dataset_path(
+        config,
+        f"gold/{name}",
+    )
 
 
-def build_paths(config: dict) -> dict:
-    """Every path a job might need, resolved once.
+def _dataset_path(
+    config: dict,
+    dataset: str,
+) -> str:
 
-    Legacy aliases (``raw``/``processed``/``curated``/``rejected``) are kept so
-    older call sites keep reading the same keys.
-    """
-    bucket = config["OUTPUT_BUCKET"]
-    paths = {"bucket": bucket}
-    paths.update({zone: zone_path(config, zone) for zone in ZONES})
-    paths.update({
-        "bronze_events": dataset_path(config, "bronze/events"),
-        "silver_events": dataset_path(config, "silver/events"),
-        "quarantine_events": dataset_path(config, "quarantine/events"),
-    })
-    paths.update({
-        "raw": paths["bronze_events"],
-        "processed": paths["silver_events"],
-        "curated": paths["gold"],
-        "rejected": paths["quarantine_events"],
-    })
-    return paths
-
-
-def resolve_gold_datasets(config: dict) -> List[str]:
-    """Which gold tables to build. An explicit empty list means *none*.
-
-    ``None``/absent means "all of them" — an empty list has to mean something
-    different, otherwise the silver job could never hand the gold layer over to
-    the gold job.
-    """
-    requested = config.get("GOLD_DATASETS", config.get("CURATED_DATASETS"))
-    if requested is None:
-        return list(GOLD_DATASETS)
-
-    unknown = [name for name in requested if name not in GOLD_DATASETS]
-    if unknown:
-        raise ValueError(f"Unknown gold dataset(s): {unknown}")
-    return list(requested)
-
-
-# ─────────────────────────────────────────────
-# METRICS
-# ─────────────────────────────────────────────
-
-def as_bool(value: Any, default: bool = False) -> bool:
-    """Read a boolean that may have arrived as a string.
-
-    A config file written by Terraform, or built from environment variables,
-    carries ``"true"`` and ``"false"`` as strings — and ``bool("false")`` is
-    ``True``, which silently turns a kill switch into an on switch. Anything
-    that is already a bool passes through.
-    """
-    if value is None:
-        return default
-    if isinstance(value, bool):
-        return value
-    if isinstance(value, (int, float)):
-        return bool(value)
-    return str(value).strip().lower() not in ("", "false", "0", "no", "off", "none")
-
-class JobMetrics:
-    """CloudWatch counters for this job.
-
-    Never raises and never requires AWS: an observability failure must not fail
-    a data run, and ``METRICS_ENABLED: false`` silences it entirely.
-    """
-
-    MAX_ITEMS_PER_CALL = 20
-
-    def __init__(self, namespace: str, dimensions: dict, enabled: bool, client=None) -> None:
-        self.namespace = namespace
-        self.dimensions = {k: str(v) for k, v in (dimensions or {}).items() if v is not None}
-        self.enabled = bool(enabled and namespace)
-        self._client = client
-        self._buffer: list = []
-
-    @classmethod
-    def from_config(cls, config: dict, stage: str, client=None) -> "JobMetrics":
-        config = config or {}
-        dimensions = {"Stage": stage, **(config.get("METRICS_DIMENSIONS") or {})}
-        if config.get("ENVIRONMENT"):
-            dimensions.setdefault("Environment", config["ENVIRONMENT"])
-
-        # The env var is the operator's kill switch — it silences metrics in a
-        # sandbox without editing every config file.
-        env_default = os.environ.get("METRICS_ENABLED", "true").strip().lower() not in ("false", "0", "no")
-
-        return cls(
-            namespace=config.get("METRICS_NAMESPACE", "Ecommerce/Pipeline"),
-            dimensions=dimensions,
-            enabled=as_bool(config.get("METRICS_ENABLED"), env_default),
-            client=client,
+    if dataset.startswith("s3://"):
+        return (
+            dataset
+            if dataset.endswith("/")
+            else dataset + "/"
         )
 
-    def _put(self, name: str, value: float, unit: str, dimensions: dict) -> None:
-        if not self.enabled:
-            return
-        merged = {**self.dimensions, **{k: str(v) for k, v in (dimensions or {}).items() if v is not None}}
-        self._buffer.append({
-            "MetricName": name,
-            "Value": float(value),
-            "Unit": unit,
-            "Dimensions": [{"Name": k, "Value": v} for k, v in merged.items()],
-        })
+    if dataset in ("processed", "silver"):
+        return dataset_path(
+            config,
+            "silver/events",
+        )
 
-    def count(self, name: str, value: float = 1, **dimensions: str) -> None:
-        self._put(name, value, "Count", dimensions)
+    if dataset.startswith("curated/"):
+        return gold_path(
+            config,
+            dataset.split("/", 1)[1],
+        )
 
-    def gauge(self, name: str, value: float, unit: str = "None", **dimensions: str) -> None:
-        self._put(name, value, unit, dimensions)
+    zone = dataset.split("/", 1)[0]
 
-    def flush(self) -> int:
-        """Ship the buffer. Returns how many metrics were accepted."""
-        if not self.enabled or not self._buffer:
-            self._buffer.clear()
-            return 0
+    if zone in ZONES:
+        return dataset_path(
+            config,
+            dataset,
+        )
 
-        pending, self._buffer = self._buffer, []
-        try:
-            client = self._client or boto3.client("cloudwatch")
-        except Exception as exc:  # noqa: BLE001 - observability must not break the run
-            logger.warning("CloudWatch unavailable, dropping %d metrics: %s", len(pending), exc)
-            return 0
-
-        sent = 0
-        for offset in range(0, len(pending), self.MAX_ITEMS_PER_CALL):
-            chunk = pending[offset:offset + self.MAX_ITEMS_PER_CALL]
-            try:
-                client.put_metric_data(Namespace=self.namespace, MetricData=chunk)
-                sent += len(chunk)
-            except Exception as exc:  # noqa: BLE001
-                logger.warning("put_metric_data failed for %d metrics: %s", len(chunk), exc)
-        return sent
+    return s3_path(
+        config["OUTPUT_BUCKET"],
+        dataset,
+    )
 
 
-#: Secret keys accepted for each setting, in order of preference. RDS rotates
-#: secrets in more than one shape depending on how they were created.
+# ============================================================
+# CONFIG
+# ============================================================
+
+def _load_text(path: str) -> str:
+
+    if path.startswith("s3://"):
+
+        bucket_key = path.replace(
+            "s3://",
+            "",
+            1,
+        )
+
+        bucket, key = bucket_key.split(
+            "/",
+            1,
+        )
+
+        s3 = boto3.client("s3")
+
+        obj = s3.get_object(
+            Bucket=bucket,
+            Key=key,
+        )
+
+        return obj["Body"].read().decode(
+            "utf-8"
+        )
+
+    return Path(path).read_text(
+        encoding="utf-8"
+    )
+
+
+def load_config(path: str) -> dict:
+    logger.info(
+        "Loading config from %s",
+        path,
+    )
+
+    return json.loads(
+        _load_text(path)
+    )
+
+
+# ============================================================
+# SECRETS MANAGER
+# ============================================================
+
 SECRET_ALIASES = {
     "host": ["host", "hostname"],
     "port": ["port"],
-    "database": ["dbname", "database", "db"],
-    "username": ["username", "user"],
+    "database": [
+        "dbname",
+        "database",
+        "db",
+    ],
+    "username": [
+        "username",
+        "user",
+    ],
     "password": ["password"],
 }
 
@@ -343,7 +294,344 @@ DEFAULT_PORT = 5432
 DEFAULT_DRIVER = "org.postgresql.Driver"
 
 
-#: Minimum columns the single-table (legacy) load expects to find.
+def _load_secret(secret_arn: str) -> dict:
+
+    client = boto3.client(
+        "secretsmanager"
+    )
+
+    response = client.get_secret_value(
+        SecretId=secret_arn
+    )
+
+    secret_string = response.get(
+        "SecretString"
+    )
+
+    if not secret_string:
+        raise ValueError(
+            f"Secret {secret_arn} has no SecretString"
+        )
+
+    return json.loads(secret_string)
+
+
+def _from_secret(
+    secret: dict,
+    setting: str,
+):
+
+    for alias in SECRET_ALIASES[setting]:
+        if secret.get(alias) not in (
+            None,
+            "",
+        ):
+            return secret[alias]
+
+    return None
+
+
+def _resolve_rds_settings(
+    config: dict,
+) -> dict:
+
+    secret = {}
+
+    if config.get("RDS_SECRET_ARN"):
+        secret = _load_secret(
+            config["RDS_SECRET_ARN"]
+        )
+
+    def pick(
+        setting: str,
+        key: str,
+        default=None,
+    ):
+
+        value = config.get(
+            f"RDS_{key}"
+        )
+
+        if value in (None, ""):
+            value = _from_secret(
+                secret,
+                setting,
+            )
+
+        return (
+            default
+            if value in (None, "")
+            else value
+        )
+
+    settings = {
+        "host": pick(
+            "host",
+            "HOST",
+        ),
+
+        "port": str(
+            pick(
+                "port",
+                "PORT",
+                DEFAULT_PORT,
+            )
+        ),
+
+        "database": pick(
+            "database",
+            "DATABASE",
+        ),
+
+        "username": pick(
+            "username",
+            "USERNAME",
+        ),
+
+        "password": pick(
+            "password",
+            "PASSWORD",
+        ),
+
+        # IMPORTANT
+        # Default schema = analytics
+        "schema": config.get(
+            "RDS_SCHEMA",
+            "analytics",
+        ),
+
+        "driver": config.get(
+            "RDS_JDBC_DRIVER",
+            DEFAULT_DRIVER,
+        ),
+
+        "sslmode": config.get(
+            "RDS_SSLMODE",
+            "require",
+        ),
+
+        "write_mode": config.get(
+            "RDS_WRITE_MODE",
+            "append",
+        ),
+
+        "batchsize": int(
+            config.get(
+                "RDS_BATCH_SIZE",
+                10000,
+            )
+        ),
+
+        "num_partitions": int(
+            config.get(
+                "RDS_NUM_PARTITIONS",
+                8,
+            )
+        ),
+
+        "truncate": (
+            str(
+                config.get(
+                    "RDS_TRUNCATE",
+                    "true",
+                )
+            ).lower()
+            not in (
+                "false",
+                "0",
+                "no",
+            )
+        ),
+    }
+
+    required = [
+        "host",
+        "database",
+        "username",
+        "password",
+    ]
+
+    missing = [
+        key
+        for key in required
+        if not settings.get(key)
+    ]
+
+    if missing:
+        raise ValueError(
+            f"Missing RDS settings: {missing}"
+        )
+
+    return settings
+
+
+# ============================================================
+# JDBC
+# ============================================================
+
+def _build_jdbc_url(
+    settings: dict,
+) -> str:
+
+    return (
+        f"jdbc:postgresql://"
+        f"{settings['host']}:"
+        f"{settings['port']}/"
+        f"{settings['database']}"
+        f"?sslmode="
+        f"{settings.get('sslmode', 'require')}"
+    )
+
+
+def _qualified(
+    settings: dict,
+    table: str,
+) -> str:
+
+    schema = settings.get(
+        "schema"
+    )
+
+    if schema and "." not in table:
+        return f"{schema}.{table}"
+
+    return table
+
+
+# ============================================================
+# CREATE POSTGRESQL SCHEMA
+# ============================================================
+
+def _validate_identifier(
+    identifier: str,
+) -> None:
+
+    if not identifier:
+        raise ValueError(
+            "PostgreSQL identifier cannot be empty"
+        )
+
+    allowed = (
+        "abcdefghijklmnopqrstuvwxyz"
+        "ABCDEFGHIJKLMNOPQRSTUVWXYZ"
+        "0123456789_"
+    )
+
+    if not all(
+        char in allowed
+        for char in identifier
+    ):
+        raise ValueError(
+            f"Invalid PostgreSQL identifier: "
+            f"{identifier}"
+        )
+
+
+def _ensure_schema(
+    spark: "SparkSession",
+    settings: dict,
+) -> None:
+
+    schema = settings.get(
+        "schema"
+    )
+
+    if not schema:
+        logger.warning(
+            "RDS_SCHEMA is empty. "
+            "Schema creation skipped."
+        )
+        return
+
+    _validate_identifier(
+        schema
+    )
+
+    jdbc_url = _build_jdbc_url(
+        settings
+    )
+
+    connection = None
+    statement = None
+
+    try:
+
+        logger.info(
+            "Creating/checking PostgreSQL schema '%s'",
+            schema,
+        )
+
+        DriverManager = (
+            spark.sparkContext
+            ._gateway
+            .jvm
+            .java.sql
+            .DriverManager
+        )
+
+        connection = (
+            DriverManager.getConnection(
+                jdbc_url,
+                settings["username"],
+                settings["password"],
+            )
+        )
+
+        connection.setAutoCommit(
+            True
+        )
+
+        statement = (
+            connection.createStatement()
+        )
+
+        sql = (
+            f'CREATE SCHEMA IF NOT EXISTS "{schema}"'
+        )
+
+        logger.info(
+            "Executing PostgreSQL: %s",
+            sql,
+        )
+
+        statement.executeUpdate(
+            sql
+        )
+
+        logger.info(
+            "Schema '%s' is ready.",
+            schema,
+        )
+
+    except Exception as exc:
+
+        logger.error(
+            "Unable to create PostgreSQL schema '%s': %s",
+            schema,
+            exc,
+        )
+
+        raise
+
+    finally:
+
+        if statement is not None:
+            try:
+                statement.close()
+            except Exception:
+                pass
+
+        if connection is not None:
+            try:
+                connection.close()
+            except Exception:
+                pass
+
+
+# ============================================================
+# TARGETS
+# ============================================================
+
 REQUIRED_COLUMNS = [
     "event_type",
     "product_id",
@@ -356,416 +644,630 @@ REQUIRED_COLUMNS = [
     "price_category",
 ]
 
-#: Default warehouse layout: every dataset the lake produces, and the table it
-#: lands in. Override per-target via ``RDS_TABLES`` in the config.
-#: Every mode is explicit, and that is not decoration. Without a ``mode`` a
-#: target falls back to ``RDS_WRITE_MODE``, which defaults to ``append`` — so
-#: the whole default layout used to append, and every gold table doubled on
-#: each run. ``fact_events`` is the only one that appends: it is a log.
-#: The gold tables are rebuilt whole each time, so they overwrite.
+
 DEFAULT_TARGETS = [
-    {"dataset": "silver/events", "table": "fact_events", "mode": "append", "optional": False},
-    {"dataset": "gold/sessions", "table": "fact_sessions", "mode": "overwrite"},
-    {"dataset": "gold/funnel_daily", "table": "agg_funnel_daily", "mode": "overwrite"},
-    {"dataset": "gold/orders", "table": "fact_orders", "mode": "overwrite"},
-    {"dataset": "gold/customer_rfm", "table": "dim_customer_rfm", "mode": "overwrite"},
-    {"dataset": "gold/product_daily", "table": "agg_product_daily", "mode": "overwrite"},
-    {"dataset": "gold/anomalies", "table": "fact_anomalies", "mode": "overwrite"},
+    {
+        "dataset": "silver/events",
+        "table": "fact_events",
+        "mode": "append",
+        "optional": False,
+    },
+    {
+        "dataset": "gold/sessions",
+        "table": "fact_sessions",
+        "mode": "overwrite",
+    },
+    {
+        "dataset": "gold/funnel_daily",
+        "table": "agg_funnel_daily",
+        "mode": "overwrite",
+    },
+    {
+        "dataset": "gold/orders",
+        "table": "fact_orders",
+        "mode": "overwrite",
+    },
+    {
+        "dataset": "gold/customer_rfm",
+        "table": "dim_customer_rfm",
+        "mode": "overwrite",
+    },
+    {
+        "dataset": "gold/product_daily",
+        "table": "agg_product_daily",
+        "mode": "overwrite",
+    },
+    {
+        "dataset": "gold/anomalies",
+        "table": "fact_anomalies",
+        "mode": "overwrite",
+    },
 ]
 
-#: Datasets the load must not silently skip. Everything else is optional: a
-#: gold table this run did not rebuild is a warning, not a failed load.
-MANDATORY_DATASETS = ("processed", "silver/events")
+
+MANDATORY_DATASETS = (
+    "processed",
+    "silver/events",
+)
 
 
-def _load_text(path: str) -> str:
-    if path.startswith("s3://"):
-        bucket_key = path.replace("s3://", "", 1)
-        bucket, key = bucket_key.split("/", 1)
-        s3 = boto3.client("s3")
-        obj = s3.get_object(Bucket=bucket, Key=key)
-        return obj["Body"].read().decode("utf-8")
+def resolve_targets(
+    config: dict,
+) -> List[Dict[str, Any]]:
 
-    return Path(path).read_text(encoding="utf-8")
-
-
-def load_config(path: str) -> dict:
-    logger.info("Loading config from %s", path)
-    return json.loads(_load_text(path))
-
-
-def _load_secret(secret_arn: str) -> dict:
-    secrets = boto3.client("secretsmanager")
-    response = secrets.get_secret_value(SecretId=secret_arn)
-    secret_string = response.get("SecretString")
-    if not secret_string:
-        raise ValueError(f"Secret {secret_arn} has no SecretString")
-    return json.loads(secret_string)
-
-
-def _build_processed_path(config: dict) -> str:
-    """The event fact table — ``silver/events``, or wherever the config puts it."""
-    return dataset_path(config, "silver/events")
-
-
-def _dataset_path(config: dict, dataset: str) -> str:
-    """Resolve a dataset name to an S3 path.
-
-    Understands the medallion names (``silver/events``, ``gold/orders``) and the
-    pre-medallion aliases (``processed``, ``curated/orders``) that older configs
-    still use.
-    """
-    if dataset.startswith("s3://"):
-        return dataset if dataset.endswith("/") else dataset + "/"
-    if dataset in ("processed", "silver"):
-        return _build_processed_path(config)
-    if dataset.startswith("curated/"):
-        return gold_path(config, dataset.split("/", 1)[1])
-    if dataset.split("/", 1)[0] in ZONES:
-        return dataset_path(config, dataset)
-
-    return s3_path(config["OUTPUT_BUCKET"], dataset)
-
-
-def resolve_targets(config: dict) -> List[Dict[str, Any]]:
-    """Build the list of ``{dataset, path, table, mode, required_columns}`` to load.
-
-    Precedence: an explicit ``RDS_TABLES`` list wins; then ``RDS_TABLE``, which
-    is the legacy single-table load; otherwise the default warehouse layout.
-
-    A config that names no table at all used to be an error demanding
-    ``RDS_TABLE``. There is only one layout this pipeline produces, so the
-    absence of any table configuration means "load the lake as designed" rather
-    than "you forgot a legacy key".
-    """
-    default_mode = config.get("RDS_WRITE_MODE", "append")
+    default_mode = config.get(
+        "RDS_WRITE_MODE",
+        "append",
+    )
 
     if config.get("RDS_TABLES"):
+
         specs = config["RDS_TABLES"]
+
     elif config.get("RDS_TABLE"):
-        specs = [{
-            "dataset": "processed",
-            "table": config["RDS_TABLE"],
-            "required_columns": REQUIRED_COLUMNS,
-        }]
+
+        specs = [
+            {
+                "dataset": "processed",
+                "table": config["RDS_TABLE"],
+                "required_columns":
+                    REQUIRED_COLUMNS,
+                "optional": False,
+            }
+        ]
+
     else:
-        logger.info("No RDS_TABLES/RDS_TABLE in the config — loading the default warehouse layout")
+
+        logger.info(
+            "No RDS_TABLES/RDS_TABLE found. "
+            "Using default warehouse layout."
+        )
+
         specs = DEFAULT_TARGETS
 
     targets = []
+
     for spec in specs:
-        dataset = spec.get("dataset", "processed")
-        table = spec.get("table")
+
+        dataset = spec.get(
+            "dataset",
+            "processed",
+        )
+
+        table = spec.get(
+            "table"
+        )
+
         if not table:
-            raise ValueError(f"Target for dataset '{dataset}' has no table name")
-        targets.append({
-            "dataset": dataset,
-            "path": spec.get("path") or _dataset_path(config, dataset),
-            "table": table,
-            "mode": spec.get("mode", default_mode),
-            "required_columns": spec.get("required_columns"),
-            "optional": bool(spec.get("optional", dataset not in MANDATORY_DATASETS)),
-        })
+            raise ValueError(
+                f"Target for {dataset} "
+                f"has no table name"
+            )
+
+        targets.append(
+            {
+                "dataset": dataset,
+
+                "path": (
+                    spec.get("path")
+                    or _dataset_path(
+                        config,
+                        dataset,
+                    )
+                ),
+
+                "table": table,
+
+                "mode": spec.get(
+                    "mode",
+                    default_mode,
+                ),
+
+                "required_columns":
+                    spec.get(
+                        "required_columns"
+                    ),
+
+                "optional": bool(
+                    spec.get(
+                        "optional",
+                        dataset
+                        not in MANDATORY_DATASETS,
+                    )
+                ),
+            }
+        )
+
     return targets
 
 
-def _from_secret(secret: dict, setting: str):
-    for alias in SECRET_ALIASES[setting]:
-        if secret.get(alias) not in (None, ""):
-            return secret[alias]
-    return None
+# ============================================================
+# READ PARQUET
+# ============================================================
 
+def _read_dataset(
+    spark: "SparkSession",
+    path: str,
+    required_columns: Optional[
+        List[str]
+    ] = None,
+):
 
-def _resolve_rds_settings(config: dict) -> dict:
-    """Build the warehouse connection profile from the config, the secret, or both.
-
-    A per-target table list makes ``RDS_TABLE`` optional — there is nothing to
-    name when every target names its own table.
-    """
-    config = config or {}
-
-    secret = {}
-    if config.get("RDS_SECRET_ARN"):
-        secret = _load_secret(config["RDS_SECRET_ARN"]) or {}
-
-    def pick(setting: str, key: str, default=None):
-        value = config.get(f"RDS_{key}")
-        if value in (None, ""):
-            value = _from_secret(secret, setting)
-        return default if value in (None, "") else value
-
-    settings = {
-        "host": pick("host", "HOST"),
-        "port": str(pick("port", "PORT", DEFAULT_PORT)),
-        "database": pick("database", "DATABASE"),
-        "username": pick("username", "USERNAME"),
-        "password": pick("password", "PASSWORD"),
-        "table": config.get("RDS_TABLE"),
-        "schema": config.get("RDS_SCHEMA"),
-        "driver": config.get("RDS_JDBC_DRIVER", DEFAULT_DRIVER),
-        "sslmode": config.get("RDS_SSLMODE", "require"),
-        "write_mode": config.get("RDS_WRITE_MODE", "append"),
-        # Batched inserts turn one round-trip per row into one per batch — the
-        # difference between minutes and hours on a few million rows.
-        "batchsize": int(config.get("RDS_BATCH_SIZE", 10000)),
-        "num_partitions": int(config.get("RDS_NUM_PARTITIONS", 8)),
-        # `truncate` keeps the table (and its grants/indexes) on an overwrite
-        # instead of letting Spark DROP and recreate it with guessed types.
-        "truncate": as_bool(config.get("RDS_TRUNCATE"), True),
-    }
-
-    required = {
-        "HOST": "host", "PORT": "port", "DATABASE": "database",
-        "USERNAME": "username", "PASSWORD": "password",
-    }
-
-    missing = [f"RDS_{name}" for name, field in required.items() if settings[field] in (None, "")]
-    if missing:
-        raise ValueError(_missing_settings_message(missing, config))
-
-    return settings
-
-
-def _missing_settings_message(missing: List[str], config: dict) -> str:
-    """Say what is missing *and* where it can come from.
-
-    This runs before Spark starts, so it is the whole of what the operator sees
-    in CloudWatch. "Missing RDS settings: [...]" alone sends them reading the
-    script; naming the file and the keys to add to it does not.
-    """
-    as_keys = ", ".join('"{0}": "<value>"'.format(name) for name in missing)
-    where = config.get("CONFIG_PATH") or "the file passed as --CONFIG_PATH"
-
-    return "\n".join([
-        f"Missing RDS settings: {missing}",
-        f"Add them to the job's config file — {where}:",
-        f"  {as_keys}",
-        "Or set RDS_SECRET_ARN in that same file to take the credentials from",
-        "Secrets Manager, which fills in whatever the config file leaves blank.",
-    ])
-
-
-def _build_jdbc_url(settings: dict) -> str:
-    return (
-        f"jdbc:postgresql://{settings['host']}:{settings['port']}/{settings['database']}"
-        f"?sslmode={settings.get('sslmode', 'require')}"
+    logger.info(
+        "Reading Parquet from %s",
+        path,
     )
 
-
-def _qualified(settings: dict, table: str) -> str:
-    """``schema.table`` when a schema is configured and the name is unqualified."""
-    schema = settings.get("schema")
-    if schema and "." not in table:
-        return f"{schema}.{table}"
-    return table
-
-
-def _read_processed_dataset(spark: "SparkSession", processed_path: str):
-    logger.info("Reading processed Parquet from %s", processed_path)
-    dataframe = spark.read.parquet(processed_path)
-    missing = [column for column in REQUIRED_COLUMNS if column not in dataframe.columns]
-    if missing:
-        raise ValueError(f"Processed dataset is missing columns: {missing}")
-    return dataframe.select(*REQUIRED_COLUMNS)
-
-
-def _read_dataset(spark: "SparkSession", path: str, required_columns: Optional[List[str]] = None):
-    """Read any Parquet dataset, optionally projecting a required column list."""
-    logger.info("Reading Parquet from %s", path)
-    dataframe = spark.read.parquet(path)
+    dataframe = spark.read.parquet(
+        path
+    )
 
     if required_columns:
-        missing = [column for column in required_columns if column not in dataframe.columns]
+
+        missing = [
+            column
+            for column in required_columns
+            if column not in dataframe.columns
+        ]
+
         if missing:
-            raise ValueError(f"Dataset {path} is missing columns: {missing}")
-        return dataframe.select(*required_columns)
+            raise ValueError(
+                f"Dataset {path} is missing "
+                f"columns: {missing}"
+            )
+
+        dataframe = dataframe.select(
+            *required_columns
+        )
 
     return dataframe
 
 
-def _write_to_rds(dataframe, settings: dict, table: Optional[str] = None, mode: Optional[str] = None) -> None:
-    jdbc_url = _build_jdbc_url(settings)
-    table = table or settings["table"]
-    mode = mode or settings["write_mode"]
-    logger.info("Writing %s rows into %s (mode=%s)", dataframe.count(), table, mode)
+# ============================================================
+# WRITE JDBC
+# ============================================================
+
+def _write_to_rds(
+    dataframe,
+    settings: dict,
+    table: str,
+    mode: str,
+) -> None:
+
+    jdbc_url = _build_jdbc_url(
+        settings
+    )
+
+    qualified_table = _qualified(
+        settings,
+        table,
+    )
+
+    row_count = dataframe.count()
+
+    logger.info(
+        "Writing %d rows to %s",
+        row_count,
+        qualified_table,
+    )
+
+    logger.info(
+        "Mode: %s",
+        mode,
+    )
 
     writer = (
-        dataframe.write.format("jdbc")
-        .option("url", jdbc_url)
-        .option("dbtable", _qualified(settings, table))
-        .option("user", settings["username"])
-        .option("password", settings["password"])
-        .option("driver", settings["driver"])
-        .option("batchsize", settings.get("batchsize", 10000))
-        .option("numPartitions", settings.get("num_partitions", 8))
-    )
-    if mode == "overwrite" and settings.get("truncate", True):
-        writer = writer.option("truncate", "true")
-
-    writer.mode(mode).save()
-
-
-def load_targets(spark: "SparkSession", targets: List[Dict[str, Any]], settings: dict) -> List[Dict[str, Any]]:
-    """Load every target, reporting per-table outcomes.
-
-    A missing *optional* dataset (a curated table the processing job did not
-    produce this run) is skipped with a warning; a failure on the mandatory
-    ``processed`` target propagates.
-    """
-    results = []
-    for target in targets:
-        entry = {"dataset": target["dataset"], "table": target["table"], "path": target["path"]}
-        try:
-            dataframe = _read_dataset(spark, target["path"], target.get("required_columns"))
-            row_count = dataframe.count()
-            if row_count == 0:
-                logger.warning("No rows at %s — skipping %s", target["path"], target["table"])
-                results.append({**entry, "status": "skipped", "reason": "empty", "rows_loaded": 0})
-                continue
-
-            _write_to_rds(dataframe, settings, table=target["table"], mode=target["mode"])
-            results.append({**entry, "status": "loaded", "rows_loaded": row_count, "mode": target["mode"]})
-        except Exception as exc:  # noqa: BLE001
-            if not target.get("optional"):
-                raise
-            logger.warning("Skipping optional target %s: %s", target["table"], exc)
-            results.append({**entry, "status": "skipped", "reason": str(exc), "rows_loaded": 0})
-    return results
-
-
-def _job_name_in(argv: List[str]) -> bool:
-    """Is this a Glue invocation?
-
-    Glue starts the script with ``--JOB_NAME <name> --CONFIG_PATH <path>``, and
-    a value may be attached with ``=``. Testing for the bare token ``JOB_NAME``
-    misses every real invocation, so strip the dashes and the ``=`` first.
-    """
-    return any(arg.lstrip("-").split("=", 1)[0] == "JOB_NAME" for arg in argv)
-
-
-def _parse_args() -> dict:
-    """Resolve the job arguments.
-
-    Glue passes exactly two: ``JOB_NAME`` and ``CONFIG_PATH``. Everything the
-    job needs — including the whole RDS connection — is in the file that
-    ``CONFIG_PATH`` points at, so there is nothing else to resolve here.
-    """
-    if getResolvedOptions and _job_name_in(sys.argv[1:]):
-        resolved = getResolvedOptions(sys.argv, ["JOB_NAME", "CONFIG_PATH"])
-        return {
-            "config": resolved["CONFIG_PATH"],
-            "mode": "glue",
-            "job_name": resolved.get("JOB_NAME"),
-        }
-
-    parser = argparse.ArgumentParser(description="Load processed Glue data into PostgreSQL RDS")
-    parser.add_argument("--config", required=True, help="Path to the Glue config JSON file or s3:// path")
-    args = parser.parse_args()
-    return {"config": args.config, "mode": "local", "job_name": None}
-
-
-def main() -> None:
-    args = _parse_args()
-    config = load_config(args["config"])
-
-    if args.get("job_name"):
-        # The Glue argument wins: it is the job's real identity, and one
-        # shared config file must not make all four jobs report the same name.
-        config["JOB_NAME"] = args["job_name"]
-    # Recorded so a validation failure can name the file it read.
-    config.setdefault("CONFIG_PATH", args["config"])
-
-    log_io(config)
-
-    rds_settings = _resolve_rds_settings(config)
-    targets = resolve_targets(config)
-    logger.info("Loading %d target(s): %s", len(targets), [t["table"] for t in targets])
-
-    started = datetime.now(timezone.utc)
-    spark = SparkSession.builder.appName(config.get("JOB_NAME", "ecommerce-rds-load")).getOrCreate()
-
-    results = load_targets(spark, targets, rds_settings)
-    total_rows = sum(item["rows_loaded"] for item in results)
-
-    try:
-        metrics = JobMetrics.from_config(config, stage="glue_rds_load")
-        metrics.count("RowsLoaded", total_rows)
-        metrics.count("TablesLoaded", sum(1 for item in results if item["status"] == "loaded"))
-        metrics.count("TablesSkipped", sum(1 for item in results if item["status"] == "skipped"))
-        metrics.gauge("JobDurationSeconds", (datetime.now(timezone.utc) - started).total_seconds(), unit="Seconds")
-        for item in results:
-            metrics.count("RowsLoadedByTable", item["rows_loaded"], Table=item["table"])
-        metrics.flush()
-    except Exception as exc:  # noqa: BLE001 - metrics must never fail a load
-        logger.warning("Metrics emission skipped: %s", exc)
-
-    print(
-        json.dumps(
-            {
-                "status": "success",
-                "mode": args["mode"],
-                "targets": results,
-                "rows_loaded": total_rows,
-                "duration_seconds": round((datetime.now(timezone.utc) - started).total_seconds(), 2),
-            },
-            indent=2,
-            default=str,
+        dataframe.write
+        .format("jdbc")
+        .option(
+            "url",
+            jdbc_url,
+        )
+        .option(
+            "dbtable",
+            qualified_table,
+        )
+        .option(
+            "user",
+            settings["username"],
+        )
+        .option(
+            "password",
+            settings["password"],
+        )
+        .option(
+            "driver",
+            settings["driver"],
+        )
+        .option(
+            "batchsize",
+            str(
+                settings.get(
+                    "batchsize",
+                    10000,
+                )
+            ),
+        )
+        .option(
+            "numPartitions",
+            str(
+                settings.get(
+                    "num_partitions",
+                    8,
+                )
+            ),
         )
     )
 
+    if (
+        mode == "overwrite"
+        and settings.get(
+            "truncate",
+            True,
+        )
+    ):
+        writer = writer.option(
+            "truncate",
+            "true",
+        )
 
-# ─────────────────────────────────────────────
-# INPUT / OUTPUT CONTRACT
-# ─────────────────────────────────────────────
+    writer.mode(
+        mode
+    ).save()
 
-def describe_io(config: dict) -> dict:
-    """Where this job reads, and which warehouse tables it writes.
+    logger.info(
+        "SUCCESS: %d rows -> %s",
+        row_count,
+        qualified_table,
+    )
 
-    The only stage whose output is not S3. The tables must already exist —
-    ``sql/warehouse/001_schema.sql`` — because an ``overwrite`` TRUNCATEs
-    rather than dropping, to keep types, indexes and grants.
-    """
-    host = config.get("RDS_HOST") or "<RDS_HOST>"
-    database = config.get("RDS_DATABASE") or "<RDS_DATABASE>"
-    targets = resolve_targets(config)  # resolved once: it logs which layout it picked
+
+# ============================================================
+# LOAD TARGETS
+# ============================================================
+
+def load_targets(
+    spark: "SparkSession",
+    targets: List[Dict[str, Any]],
+    settings: dict,
+) -> List[Dict[str, Any]]:
+
+    results = []
+
+    for target in targets:
+
+        entry = {
+            "dataset":
+                target["dataset"],
+
+            "table":
+                _qualified(
+                    settings,
+                    target["table"],
+                ),
+
+            "path":
+                target["path"],
+        }
+
+        try:
+
+            dataframe = _read_dataset(
+                spark,
+                target["path"],
+                target.get(
+                    "required_columns"
+                ),
+            )
+
+            row_count = dataframe.count()
+
+            if row_count == 0:
+
+                logger.warning(
+                    "Dataset %s is empty. "
+                    "Skipping %s.",
+                    target["path"],
+                    target["table"],
+                )
+
+                results.append({
+                    **entry,
+                    "status": "skipped",
+                    "reason": "empty",
+                    "rows_loaded": 0,
+                })
+
+                continue
+
+            _write_to_rds(
+                dataframe,
+                settings,
+                target["table"],
+                target["mode"],
+            )
+
+            results.append({
+                **entry,
+                "status": "loaded",
+                "rows_loaded": row_count,
+                "mode": target["mode"],
+            })
+
+        except Exception as exc:
+
+            if not target.get(
+                "optional",
+                False,
+            ):
+                raise
+
+            logger.warning(
+                "Optional target %s skipped: %s",
+                target["table"],
+                exc,
+            )
+
+            results.append({
+                **entry,
+                "status": "skipped",
+                "reason": str(exc),
+                "rows_loaded": 0,
+            })
+
+    return results
+
+
+# ============================================================
+# GLUE ARGUMENTS
+# ============================================================
+
+def _job_name_in(
+    argv: List[str],
+) -> bool:
+
+    return any(
+        arg.lstrip("-").split(
+            "=",
+            1,
+        )[0] == "JOB_NAME"
+        for arg in argv
+    )
+
+
+def _parse_args() -> dict:
+
+    if (
+        getResolvedOptions
+        and _job_name_in(
+            sys.argv[1:]
+        )
+    ):
+
+        resolved = getResolvedOptions(
+            sys.argv,
+            [
+                "JOB_NAME",
+                "CONFIG_PATH",
+            ],
+        )
+
+        return {
+            "config":
+                resolved["CONFIG_PATH"],
+
+            "mode":
+                "glue",
+
+            "job_name":
+                resolved.get(
+                    "JOB_NAME"
+                ),
+        }
+
+    parser = argparse.ArgumentParser()
+
+    parser.add_argument(
+        "--config",
+        required=True,
+    )
+
+    args = parser.parse_args()
+
     return {
-        "job": "glue_rds_load",
-        "reads": [
-            {"what": target.get("dataset", "?"), "format": "Parquet",
-             "where": target.get("path", "?")}
-            for target in targets
-        ],
-        "writes": [
-            {"what": target.get("table", "?"),
-             "format": f"PostgreSQL ({target.get('mode', 'append')})",
-             "where": f"jdbc:postgresql://{host}/{database}"}
-            for target in targets
-        ],
+        "config": args.config,
+        "mode": "local",
+        "job_name": None,
     }
 
 
-def log_io(config: dict) -> None:
-    """Print the contract at start-up, before any work.
+# ============================================================
+# MAIN
+# ============================================================
 
-    A job that reports success without writing anything is the hardest failure
-    to diagnose, and the first question is always the same: which prefix did it
-    actually read? Answer it in the first three lines of the log rather than
-    after an afternoon of guessing.
-    """
-    # Never raises. This is diagnostics printed before any work — a job killed
-    # by its own logging is the worst possible trade.
+def main() -> None:
+
+    # --------------------------------------------------------
+    # 1. Arguments
+    # --------------------------------------------------------
+
+    args = _parse_args()
+
+    # --------------------------------------------------------
+    # 2. Config
+    # --------------------------------------------------------
+
+    config = load_config(
+        args["config"]
+    )
+
+    if args.get("job_name"):
+        config["JOB_NAME"] = (
+            args["job_name"]
+        )
+
+    config.setdefault(
+        "CONFIG_PATH",
+        args["config"],
+    )
+
+    # --------------------------------------------------------
+    # 3. RDS settings
+    # --------------------------------------------------------
+
+    settings = _resolve_rds_settings(
+        config
+    )
+
+    logger.info(
+        "============================================"
+    )
+
+    logger.info(
+        "RDS CONFIGURATION"
+    )
+
+    logger.info(
+        "Host     : %s",
+        settings["host"],
+    )
+
+    logger.info(
+        "Port     : %s",
+        settings["port"],
+    )
+
+    logger.info(
+        "Database : %s",
+        settings["database"],
+    )
+
+    logger.info(
+        "Schema   : %s",
+        settings["schema"],
+    )
+
+    logger.info(
+        "============================================"
+    )
+
+    # --------------------------------------------------------
+    # 4. Targets
+    # --------------------------------------------------------
+
+    targets = resolve_targets(
+        config
+    )
+
+    logger.info(
+        "Targets:"
+    )
+
+    for target in targets:
+        logger.info(
+            "  %s -> %s [%s]",
+            target["path"],
+            _qualified(
+                settings,
+                target["table"],
+            ),
+            target["mode"],
+        )
+
+    # --------------------------------------------------------
+    # 5. Spark
+    # --------------------------------------------------------
+
+    started = datetime.now(
+        timezone.utc
+    )
+
+    spark = (
+        SparkSession.builder
+        .appName(
+            config.get(
+                "JOB_NAME",
+                "glue-rds-load",
+            )
+        )
+        .getOrCreate()
+    )
+
     try:
-        contract = describe_io(config)
-        logger.info("--- %s : input/output contract ---", contract["job"])
-        for side in ("reads", "writes"):
-            for item in contract[side]:
-                logger.info(
-                    "  %-6s %-26s %-12s %s",
-                    side.upper(), item.get("what"), f"[{item.get('format')}]", item.get("where"),
-                )
-    except Exception as exc:  # noqa: BLE001 - diagnostics must not stop the job
-        logger.warning("Could not describe the input/output contract: %s", exc)
 
+        # ====================================================
+        # IMPORTANT FIX
+        # ====================================================
+        #
+        # BEFORE Spark JDBC .save():
+        #
+        # CREATE SCHEMA IF NOT EXISTS analytics
+        #
+        # ====================================================
+
+        _ensure_schema(
+            spark,
+            settings,
+        )
+
+        # ----------------------------------------------------
+        # 6. Load all datasets
+        # ----------------------------------------------------
+
+        results = load_targets(
+            spark,
+            targets,
+            settings,
+        )
+
+        total_rows = sum(
+            item["rows_loaded"]
+            for item in results
+        )
+
+        duration = (
+            datetime.now(
+                timezone.utc
+            )
+            - started
+        ).total_seconds()
+
+        # ----------------------------------------------------
+        # 7. Result
+        # ----------------------------------------------------
+
+        result = {
+            "status": "success",
+            "job": config.get(
+                "JOB_NAME"
+            ),
+            "schema": settings[
+                "schema"
+            ],
+            "targets": results,
+            "rows_loaded": total_rows,
+            "duration_seconds": round(
+                duration,
+                2,
+            ),
+        }
+
+        print(
+            json.dumps(
+                result,
+                indent=2,
+                default=str,
+            )
+        )
+
+    finally:
+
+        spark.stop()
+
+
+# ============================================================
+# ENTRY POINT
+# ============================================================
 
 if __name__ == "__main__":
     main()
