@@ -1,0 +1,77 @@
+{
+  "_comment": [
+    "What starts what. Reference material for your IaC — no code reads this file.",
+    "",
+    "There is no EventBridge here: the Step Functions state machine drives the whole",
+    "chain, including the producer Lambda. That leaves exactly one thing to schedule",
+    "from outside — the state machine itself — instead of three rules to keep in step.",
+    "",
+    "The trade is latency on the file drops. A partner file is no longer picked up",
+    "seconds after it lands; it waits for the next run of the chain. If that matters,",
+    "the answer is an S3 notification to a small Lambda that calls StartExecution."
+  ],
+
+  "state_machine": {
+    "_comment": [
+      "The only thing that needs an external trigger. Start it however your account",
+      "already schedules work — a cron on a build server, an operator clicking Start",
+      "Execution, or the scheduler your platform team provides.",
+      "",
+      "`process_date` is the partition every job downstream restricts itself to."
+    ],
+    "name": "ecommerce-medallion-pipeline",
+    "cadence": "once a day, after the day is closed in UTC",
+    "input": { "process_date": "<yesterday>" }
+  },
+
+  "event_source_mappings": [
+    {
+      "_comment": [
+        "Source 1 — the streaming path, and the one trigger that is *not* the state",
+        "machine's: SQS pushes to the Lambda as messages arrive, which is the point of",
+        "having a queue at all.",
+        "",
+        "ReportBatchItemFailures is what makes a partial batch failure retry only the",
+        "affected messages instead of all ten."
+      ],
+      "source": "sqs",
+      "queue": "ecommerce-events",
+      "function": "ecommerce-stream-processor",
+      "batch_size": 10,
+      "maximum_batching_window_seconds": 30,
+      "function_response_types": ["ReportBatchItemFailures"],
+      "dead_letter_queue": "ecommerce-events-dlq",
+      "max_receive_count": 5
+    }
+  ],
+
+  "glue_crawlers": [
+    {
+      "_comment": [
+        "Catalog the lake so Athena can query it without a schema per query. Crawl",
+        "silver and gold only — bronze is raw by definition and its schema is allowed",
+        "to drift."
+      ],
+      "name": "ecommerce-lake-crawler",
+      "database": "ecommerce_lake",
+      "targets": [
+        "s3://my-data-lake/silver/",
+        "s3://my-data-lake/gold/"
+      ]
+    }
+  ],
+
+  "alarms": [
+    {
+      "_comment": "The pipeline emits its own counters; these are the two worth paging on.",
+      "metric": "Ecommerce/Pipeline QualityPassPct",
+      "condition": "< 99 for 2 consecutive periods",
+      "action": "sns:data-pipeline-alerts"
+    },
+    {
+      "metric": "Ecommerce/Pipeline RecordsRejected",
+      "condition": "> 100 in 15 minutes",
+      "action": "sns:data-pipeline-alerts"
+    }
+  ]
+}

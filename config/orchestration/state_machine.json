@@ -1,0 +1,149 @@
+{
+  "Comment": "E-commerce medallion pipeline, end to end: it invokes the producer Lambda, then runs the four Glue jobs in dependency order. Replace <ACCOUNT> and the names with your own. The state machine is the only thing that needs scheduling — see triggers.json.",
+  "StartAt": "ProduceEvents",
+  "TimeoutSeconds": 10800,
+  "States": {
+    "ProduceEvents": {
+      "Comment": "Source 1 — one batch of sessions from the catalog API into SQS. The Lambda does one batch per invocation and returns; the cadence is this state machine's, not a loop inside the function.",
+      "Type": "Task",
+      "Resource": "arn:aws:states:::lambda:invoke",
+      "Parameters": {
+        "FunctionName": "ecommerce-producer",
+        "Payload": {
+          "CONFIG_PATH": "s3://my-data-lake/config/ecommerce_producer.json"
+        }
+      },
+      "Retry": [
+        {
+          "ErrorEquals": [
+            "Lambda.ServiceException",
+            "Lambda.TooManyRequestsException"
+          ],
+          "IntervalSeconds": 30,
+          "MaxAttempts": 3,
+          "BackoffRate": 2.0
+        }
+      ],
+      "Catch": [
+        {
+          "Comment": "A flaky catalog API must not hold up the partner files already waiting.",
+          "ErrorEquals": [
+            "States.ALL"
+          ],
+          "ResultPath": "$.producerError",
+          "Next": "WaitForQueueDrain"
+        }
+      ],
+      "Next": "WaitForQueueDrain"
+    },
+    "WaitForQueueDrain": {
+      "Comment": "SQS delivers to the landing Lambda on its own schedule; this pause lets the batch just published reach bronze before the chain reads it.",
+      "Type": "Wait",
+      "Seconds": 120,
+      "Next": "IngestPartnerDrops"
+    },
+    "IngestPartnerDrops": {
+      "Comment": "Job 1 — source 2. Reads whatever is waiting in landing/partners/, lifts it into v3 records and moves the files aside.",
+      "Type": "Task",
+      "Resource": "arn:aws:states:::glue:startJobRun.sync",
+      "Parameters": {
+        "JobName": "ecommerce-landing-ingest",
+        "Arguments": {
+          "--CONFIG_PATH": "s3://my-data-lake/config/glue_landing_ingest.json"
+        }
+      },
+      "Retry": [
+        {
+          "ErrorEquals": [
+            "States.TaskFailed"
+          ],
+          "IntervalSeconds": 60,
+          "MaxAttempts": 2,
+          "BackoffRate": 2.0
+        }
+      ],
+      "Catch": [
+        {
+          "Comment": "The streaming path keeps flowing without the file drops: a stale partner batch beats no facts at all.",
+          "ErrorEquals": [
+            "States.ALL"
+          ],
+          "ResultPath": "$.landingError",
+          "Next": "BronzeToSilver"
+        }
+      ],
+      "Next": "BronzeToSilver"
+    },
+    "BronzeToSilver": {
+      "Comment": "Job 2 — clean, type, deduplicate the event stream. FAIL_ON_QUALITY in its config makes a breach of the batch thresholds abort here, which is what keeps gold off a bad partition.",
+      "Type": "Task",
+      "Resource": "arn:aws:states:::glue:startJobRun.sync",
+      "Parameters": {
+        "JobName": "ecommerce-bronze-to-silver",
+        "Arguments": {
+          "--CONFIG_PATH": "s3://my-data-lake/config/glue_bronze_to_silver.json",
+          "--PROCESS_DATE.$": "$.process_date"
+        }
+      },
+      "Retry": [
+        {
+          "ErrorEquals": [
+            "States.TaskFailed"
+          ],
+          "IntervalSeconds": 120,
+          "MaxAttempts": 2,
+          "BackoffRate": 2.0
+        }
+      ],
+      "Next": "SilverToGold"
+    },
+    "SilverToGold": {
+      "Comment": "Job 3 — the six analytical tables.",
+      "Type": "Task",
+      "Resource": "arn:aws:states:::glue:startJobRun.sync",
+      "Parameters": {
+        "JobName": "ecommerce-silver-to-gold",
+        "Arguments": {
+          "--CONFIG_PATH": "s3://my-data-lake/config/glue_silver_to_gold.json",
+          "--PROCESS_DATE.$": "$.process_date"
+        }
+      },
+      "Retry": [
+        {
+          "ErrorEquals": [
+            "States.TaskFailed"
+          ],
+          "IntervalSeconds": 120,
+          "MaxAttempts": 2,
+          "BackoffRate": 2.0
+        }
+      ],
+      "Next": "LoadWarehouse"
+    },
+    "LoadWarehouse": {
+      "Comment": "Job 4 — publish to PostgreSQL. Last, so BI never sees a half-built day. The whole RDS connection is in the config file at --CONFIG_PATH; the job takes no other argument. Keep the password out of that file with RDS_SECRET_ARN.",
+      "Type": "Task",
+      "Resource": "arn:aws:states:::glue:startJobRun.sync",
+      "Parameters": {
+        "JobName": "ecommerce-gold-to-postgres",
+        "Arguments": {
+          "--CONFIG_PATH": "s3://my-data-lake/config/glue_rds_load.json"
+        }
+      },
+      "Retry": [
+        {
+          "ErrorEquals": [
+            "States.TaskFailed"
+          ],
+          "IntervalSeconds": 180,
+          "MaxAttempts": 2,
+          "BackoffRate": 2.0
+        }
+      ],
+      "Next": "Succeeded"
+    },
+    "Succeeded": {
+      "Type": "Succeed"
+    }
+  }
+}

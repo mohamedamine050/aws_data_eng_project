@@ -1,0 +1,59 @@
+{
+  "_comment": "Glue job 4 — silver + gold -> PostgreSQL warehouse. Pass as --CONFIG_PATH.",
+  "OUTPUT_BUCKET": "my-data-lake",
+  "ENVIRONMENT": "dev",
+  "METRICS_ENABLED": true,
+  "METRICS_NAMESPACE": "Ecommerce/Pipeline",
+  "JOB_NAME": "ecommerce-gold-to-postgres",
+  "_rds": "Toute la connexion RDS est ici. Le job ne reçoit que --JOB_NAME et --CONFIG_PATH ; il lit ce fichier et en sort l'URL JDBC.",
+  "RDS_HOST": "ecommerce-warehouse.abcdefghijkl.eu-west-3.rds.amazonaws.com",
+  "RDS_PORT": "5432",
+  "RDS_DATABASE": "ecommerce",
+  "RDS_SCHEMA": "analytics",
+  "RDS_USERNAME": "adminuser",
+  "RDS_PASSWORD": "",
+  "RDS_SSLMODE": "require",
+  "_rds_secret": "Pour ne pas écrire le mot de passe ici : poser RDS_SECRET_ARN et laisser RDS_USERNAME/RDS_PASSWORD vides — le job complète depuis Secrets Manager. Un mot de passe dans ce fichier sur S3 est lisible par tout ce qui a s3:GetObject.",
+  "RDS_WRITE_MODE": "append",
+  "RDS_BATCH_SIZE": 10000,
+  "RDS_NUM_PARTITIONS": 8,
+  "RDS_TRUNCATE": true,
+  "_targets": "RDS_LOAD_ALL uses the default layout. To replay a partition of fact_events, point it at analytics.stg_fact_events and call analytics.merge_fact_events() — see sql/warehouse/003_upsert.sql.",
+  "RDS_TABLES": [
+    {
+      "dataset": "silver/events",
+      "table": "analytics.fact_events",
+      "mode": "append"
+    },
+    {
+      "dataset": "gold/sessions",
+      "table": "analytics.fact_sessions",
+      "mode": "overwrite"
+    },
+    {
+      "dataset": "gold/funnel_daily",
+      "table": "analytics.agg_funnel_daily",
+      "mode": "overwrite"
+    },
+    {
+      "dataset": "gold/orders",
+      "table": "analytics.fact_orders",
+      "mode": "overwrite"
+    },
+    {
+      "dataset": "gold/customer_rfm",
+      "table": "analytics.dim_customer_rfm",
+      "mode": "overwrite"
+    },
+    {
+      "dataset": "gold/product_daily",
+      "table": "analytics.agg_product_daily",
+      "mode": "overwrite"
+    },
+    {
+      "dataset": "gold/anomalies",
+      "table": "analytics.fact_anomalies",
+      "mode": "overwrite"
+    }
+  ]
+}
