@@ -1,0 +1,89 @@
+name: Destroy Infrastructure
+
+on:
+  workflow_dispatch:
+    inputs:
+      confirm_destroy:
+        description: "Type DESTROY to confirm infrastructure destruction"
+        required: true
+        type: string
+
+jobs:
+  destroy:
+    runs-on: ubuntu-latest
+
+    steps:
+
+      # ─────────────────────────────────────────────
+      # Confirmation de sécurité
+      # ─────────────────────────────────────────────
+      - name: Confirm Destroy
+        run: |
+          if [ "${{ github.event.inputs.confirm_destroy }}" != "DESTROY" ]; then
+            echo "❌ Destruction cancelled."
+            echo "Please type DESTROY to confirm."
+            exit 1
+          fi
+
+          echo "⚠️ Infrastructure destruction confirmed."
+
+      # ─────────────────────────────────────────────
+      # Checkout Terraform Repository
+      # ─────────────────────────────────────────────
+      - name: Checkout Terraform Repo
+        uses: actions/checkout@v4
+        with:
+          repository: mohamedamine050/terraform-e-commerce-f5e76fdc
+          token: ${{ secrets.GH_TOKEN }}
+
+      # ─────────────────────────────────────────────
+      # Configure AWS
+      # ─────────────────────────────────────────────
+      - name: Configure AWS Credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region: ${{ secrets.AWS_REGION }}
+
+      # ─────────────────────────────────────────────
+      # Install Terraform
+      # ─────────────────────────────────────────────
+      - name: Setup Terraform
+        uses: hashicorp/setup-terraform@v3
+
+      # ─────────────────────────────────────────────
+      # Destroy Infrastructure
+      # ─────────────────────────────────────────────
+      - name: Terraform Init - Infra
+        working-directory: infra
+        run: terraform init
+
+      - name: Terraform Destroy - Infra
+        working-directory: infra
+        run: |
+          echo "🔥 Destroying main infrastructure..."
+          terraform destroy -auto-approve
+
+      # ─────────────────────────────────────────────
+      # Destroy Bootstrap
+      # ⚠️ S3 State + DynamoDB Lock
+      # ─────────────────────────────────────────────
+      - name: Terraform Init - Bootstrap
+        working-directory: bootstrap
+        run: terraform init
+
+      - name: Terraform Destroy - Bootstrap
+        working-directory: bootstrap
+        run: |
+          echo "🔥 Destroying bootstrap infrastructure..."
+          terraform destroy -auto-approve
+
+      # ─────────────────────────────────────────────
+      # Final Message
+      # ─────────────────────────────────────────────
+      - name: Destroy Completed
+        run: |
+          echo "======================================"
+          echo "✅ Infrastructure destroyed successfully"
+          echo "======================================"
